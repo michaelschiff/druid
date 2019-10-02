@@ -38,7 +38,16 @@
     <option name="originalFiles">
       <list>
         <option value="$PROJECT_DIR$/pom.xml" />
+        <option value="$PROJECT_DIR$/extensions-contrib/prometheus-emitter/pom.xml" />
       </list>
+    </option>
+    <option name="ignoredFiles">
+      <set>
+        <option value="$PROJECT_DIR$/cloud/aws-common/pom.xml" />
+        <option value="$PROJECT_DIR$/extensions-core/google-extensions/pom.xml" />
+        <option value="$PROJECT_DIR$/extensions-core/orc-extensions/pom.xml" />
+        <option value="$PROJECT_DIR$/extensions-core/parquet-extensions/pom.xml" />
+      </set>
     </option>
   </component>
   <component name="NullableNotNullManager">
