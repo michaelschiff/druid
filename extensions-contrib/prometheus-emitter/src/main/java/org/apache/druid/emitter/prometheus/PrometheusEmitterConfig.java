@@ -19,28 +19,26 @@
 
 package org.apache.druid.emitter.prometheus;
 
+import javax.annotation.Nullable;
+
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.google.common.base.Preconditions;
-
-import javax.annotation.Nullable;
-import java.util.Collections;
-import java.util.List;
-import java.util.Objects;
 
 /**
  */
 public class PrometheusEmitterConfig
 {
 
-//  @JsonProperty
-//  private final String prefix;
+  @JsonProperty
+  private final String namespace;
 
   @JsonCreator
-  public PrometheusEmitterConfig(
-          //TODO maybe this should be a configurable namespace ?
-//      @JsonProperty("prefix") @Nullable String prefix,
+  public PrometheusEmitterConfig(@JsonProperty("namespace") @Nullable String namespace)
   {
-//    this.prefix = prefix != null ? prefix : "";
+    this.namespace = namespace != null ? namespace : "";
+  }
+
+  public String getNamespace() {
+    return namespace;
   }
 }

@@ -53,8 +53,8 @@ public class PrometheusEmitterModule implements DruidModule
   @Provides
   @ManageLifecycle
   @Named(EMITTER_TYPE)
-  public Emitter getEmitter(PrometheusEmitterConfig config, ObjectMapper mapper)
+  public Emitter getEmitter(PrometheusEmitterConfig config)
   {
-    return PrometheusEmitter.of();
+    return PrometheusEmitter.of(config);
   }
 }

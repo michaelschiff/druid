@@ -35,10 +35,16 @@ import io.prometheus.client.Histogram;
 public class PrometheusEmitter implements Emitter {
 
   private static final Logger log = new Logger(PrometheusEmitter.class);
+  private final Metrics metrics;
 
-  static PrometheusEmitter of() {
-    return new PrometheusEmitter();
+  static PrometheusEmitter of(PrometheusEmitterConfig config) {
+    return new PrometheusEmitter(config);
   }
+
+  public PrometheusEmitter(PrometheusEmitterConfig config) {
+    metrics = new Metrics(config.getNamespace());
+  }
+
 
   @Override
   public void start() {
@@ -58,7 +64,7 @@ public class PrometheusEmitter implements Emitter {
     Map<String, Object> userDims = metricEvent.getUserDims();
     Number value = metricEvent.getValue();
 
-    Metrics byName = Metrics.getByName(metric);
+    Metrics.Metric byName = metrics.getByName(metric);
     String[] labelValues = new String[byName.getDimensions().length];
     String[] labelNames = byName.getDimensions();
     for (int i = 0; i < labelValues.length; i++) {
