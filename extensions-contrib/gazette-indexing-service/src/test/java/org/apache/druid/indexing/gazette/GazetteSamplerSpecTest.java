@@ -17,21 +17,27 @@
  * under the License.
  */
 
-package org.apache.druid.indexing.kafka;
+package org.apache.druid.indexing.gazette;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.michaelschiff.TestingJournalService;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import org.apache.curator.test.TestingCluster;
+import dev.gazette.core.broker.protocol.JournalGrpc;
+import dev.gazette.core.broker.protocol.Protocol;
+import io.grpc.ManagedChannel;
+import io.grpc.Server;
+import io.grpc.inprocess.InProcessChannelBuilder;
+import io.grpc.inprocess.InProcessServerBuilder;
+import io.grpc.stub.StreamObserver;
 import org.apache.druid.data.input.impl.DimensionsSpec;
 import org.apache.druid.data.input.impl.FloatDimensionSchema;
 import org.apache.druid.data.input.impl.JsonInputFormat;
 import org.apache.druid.data.input.impl.LongDimensionSchema;
 import org.apache.druid.data.input.impl.StringDimensionSchema;
 import org.apache.druid.data.input.impl.TimestampSpec;
-import org.apache.druid.indexing.kafka.supervisor.KafkaSupervisorIOConfig;
-import org.apache.druid.indexing.kafka.supervisor.KafkaSupervisorSpec;
-import org.apache.druid.indexing.kafka.test.TestBroker;
+import org.apache.druid.indexing.gazette.supervisor.GazetteSupervisorIOConfig;
+import org.apache.druid.indexing.gazette.supervisor.GazetteSupervisorSpec;
 import org.apache.druid.indexing.overlord.sampler.InputSourceSampler;
 import org.apache.druid.indexing.overlord.sampler.SamplerConfig;
 import org.apache.druid.indexing.overlord.sampler.SamplerResponse;
@@ -46,21 +52,22 @@ import org.apache.druid.segment.TestHelper;
 import org.apache.druid.segment.indexing.DataSchema;
 import org.apache.druid.segment.indexing.granularity.UniformGranularitySpec;
 import org.apache.druid.testing.InitializedNullHandlingTest;
-import org.apache.kafka.clients.producer.KafkaProducer;
-import org.apache.kafka.clients.producer.ProducerRecord;
 import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
+import javax.annotation.Nullable;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 
-public class KafkaSamplerSpecTest extends InitializedNullHandlingTest
+public class GazetteSamplerSpecTest extends InitializedNullHandlingTest
 {
+
   private static final ObjectMapper OBJECT_MAPPER = TestHelper.makeJsonMapper();
-  private static final String TOPIC = "sampling";
+  private static final String JOURNAL_NAME = "sampling/part-000";
   private static final DataSchema DATA_SCHEMA = new DataSchema(
       "test_ds",
       new TimestampSpec("timestamp", "iso", null),
@@ -83,54 +90,73 @@ public class KafkaSamplerSpecTest extends InitializedNullHandlingTest
       null
   );
 
-  private static TestingCluster zkServer;
-  private static TestBroker kafkaServer;
-
-  private static List<ProducerRecord<byte[], byte[]>> generateRecords(String topic)
+  private static Map<String, List<byte[]>> generateRecords(String topic)
   {
-    return ImmutableList.of(
-        new ProducerRecord<>(topic, 0, null, jb("2008", "a", "y", "10", "20.0", "1.0")),
-        new ProducerRecord<>(topic, 0, null, jb("2009", "b", "y", "10", "20.0", "1.0")),
-        new ProducerRecord<>(topic, 0, null, jb("2010", "c", "y", "10", "20.0", "1.0")),
-        new ProducerRecord<>(topic, 0, null, jb("246140482-04-24T15:36:27.903Z", "x", "z", "10", "20.0", "1.0")),
-        new ProducerRecord<>(topic, 0, null, StringUtils.toUtf8("unparseable")),
-        new ProducerRecord<>(topic, 0, null, null)
-    );
+    return ImmutableMap.of(topic,
+            ImmutableList.of(
+       jb("2008", "a", "y", "10", "20.0", "1.0"),
+        jb("2009", "b", "y", "10", "20.0", "1.0"),
+        jb("2010", "c", "y", "10", "20.0", "1.0"),
+         jb("246140482-04-24T15:36:27.903Z", "x", "z", "10", "20.0", "1.0"),
+         StringUtils.toUtf8("unparseable"),
+       null));
   }
+
+  private static JournalGrpc.JournalImplBase journalService = new JournalGrpc.JournalImplBase() {
+    @Override
+    public void list(Protocol.ListRequest request, StreamObserver<Protocol.ListResponse> responseObserver) {
+      Protocol.ListResponse resp = Protocol.ListResponse.newBuilder()
+              .setHeader(Protocol.Header.newBuilder()) //TODO(michaelschiff): realistic header
+              .setStatus(Protocol.Status.OK)
+              .addJournals(Protocol.ListResponse.Journal.newBuilder()
+                      .setSpec(Protocol.JournalSpec.newBuilder()
+                              .setName(JOURNAL_NAME)))
+              .build();
+      responseObserver.onNext(resp);
+      responseObserver.onCompleted();
+    }
+
+    @Override
+    public void read(Protocol.ReadRequest request, StreamObserver<Protocol.ReadResponse> responseObserver) {
+    }
+  };
+  private static JournalGrpc.JournalBlockingStub stub;
 
   @BeforeClass
   public static void setupClass() throws Exception
   {
-    zkServer = new TestingCluster(1);
-    zkServer.start();
-
-    kafkaServer = new TestBroker(zkServer.getConnectString(), null, 1, ImmutableMap.of("num.partitions", "2"));
-    kafkaServer.start();
+    String serverName = InProcessServerBuilder.generateName();
+    Server server = InProcessServerBuilder.forName(serverName)
+            .directExecutor()
+            .addService(journalService)
+            .build()
+            .start();
+    ManagedChannel channel = InProcessChannelBuilder.forName(serverName)
+            .directExecutor()
+            .build();
+    stub = JournalGrpc.newBlockingStub(channel);
   }
 
   @AfterClass
-  public static void tearDownClass() throws Exception
-  {
-    kafkaServer.close();
-    zkServer.stop();
+  public static void afterClass() {
+    //TODO: close journalService
   }
+
 
   @Test(timeout = 30_000L)
   public void testSample()
   {
-    insertData(generateRecords(TOPIC));
-
-    KafkaSupervisorSpec supervisorSpec = new KafkaSupervisorSpec(
+    GazetteSupervisorSpec supervisorSpec = new GazetteSupervisorSpec(
         null,
         DATA_SCHEMA,
         null,
-        new KafkaSupervisorIOConfig(
-            TOPIC,
+        new GazetteSupervisorIOConfig(
+            "localhost:8080",
+            "sampling/",
             new JsonInputFormat(JSONPathSpec.DEFAULT, null),
             null,
             null,
             null,
-            kafkaServer.consumerProperties(),
             null,
             null,
             null,
@@ -153,7 +179,7 @@ public class KafkaSamplerSpecTest extends InitializedNullHandlingTest
         null
     );
 
-    KafkaSamplerSpec samplerSpec = new KafkaSamplerSpec(
+    GazetteSamplerSpec samplerSpec = new TestingGazetteSamplerSpec(
         supervisorSpec,
         new SamplerConfig(5, null),
         new InputSourceSampler(),
@@ -257,18 +283,6 @@ public class KafkaSamplerSpecTest extends InitializedNullHandlingTest
     Assert.assertFalse(it.hasNext());
   }
 
-  private static void insertData(List<ProducerRecord<byte[], byte[]>> data)
-  {
-    try (final KafkaProducer<byte[], byte[]> kafkaProducer = kafkaServer.newProducer()) {
-      kafkaProducer.initTransactions();
-      kafkaProducer.beginTransaction();
-
-      data.forEach(kafkaProducer::send);
-
-      kafkaProducer.commitTransaction();
-    }
-  }
-
   private static byte[] jb(String timestamp, String dim1, String dim2, String dimLong, String dimFloat, String met1)
   {
     try {
@@ -285,6 +299,17 @@ public class KafkaSamplerSpecTest extends InitializedNullHandlingTest
     }
     catch (Exception e) {
       throw new RuntimeException(e);
+    }
+  }
+
+  private static class TestingGazetteSamplerSpec extends GazetteSamplerSpec {
+    public TestingGazetteSamplerSpec(GazetteSupervisorSpec ingestionSpec, @Nullable SamplerConfig samplerConfig, InputSourceSampler inputSourceSampler, ObjectMapper objectMapper) {
+      super(ingestionSpec, samplerConfig, inputSourceSampler, objectMapper);
+    }
+
+    @Override
+    protected GazetteRecordSupplier createRecordSupplier() {
+      return new GazetteRecordSupplier(stub);
     }
   }
 }

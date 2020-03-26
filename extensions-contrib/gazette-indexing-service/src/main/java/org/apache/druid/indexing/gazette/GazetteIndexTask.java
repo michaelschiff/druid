@@ -34,12 +34,7 @@ import org.apache.druid.segment.realtime.appenderator.AppenderatorsManager;
 import org.apache.druid.segment.realtime.firehose.ChatHandlerProvider;
 import org.apache.druid.server.security.AuthorizerMapper;
 
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.Map;
-import java.util.Properties;
-import java.util.Set;
-import java.util.stream.Collectors;
 
 public class GazetteIndexTask extends SeekableStreamIndexTask<String, Long>
 {
@@ -88,50 +83,6 @@ public class GazetteIndexTask extends SeekableStreamIndexTask<String, Long>
     );
   }
 
-  long getPollRetryMs()
-  {
-    return pollRetryMs;
-  }
-
-
-//TODO(michaelschiff): gazette grpc bindings instead
-//  @Deprecated
-//  KafkaConsumer<byte[], byte[]> newConsumer()
-//  {
-//    ClassLoader currCtxCl = Thread.currentThread().getContextClassLoader();
-//    try {
-//      Thread.currentThread().setContextClassLoader(getClass().getClassLoader());
-//
-//      final Map<String, Object> consumerConfigs = KafkaConsumerConfigs.getConsumerProperties();
-//      final Properties props = new Properties();
-//      KafkaRecordSupplier.addConsumerPropertiesFromConfig(
-//          props,
-//          configMapper,
-//          ioConfig.getConsumerProperties()
-//      );
-//      props.putAll(consumerConfigs);
-//
-//      return new KafkaConsumer<>(props);
-//    }
-//    finally {
-//      Thread.currentThread().setContextClassLoader(currCtxCl);
-//    }
-//  }
-//
-//  @Deprecated
-//  static void assignPartitions(
-//      final KafkaConsumer consumer,
-//      final String topic,
-//      final Set<Integer> partitions
-//  )
-//  {
-//    consumer.assign(
-//        new ArrayList<>(
-//            partitions.stream().map(n -> new TopicPartition(topic, n)).collect(Collectors.toList())
-//        )
-//    );
-//  }
-
   @Override
   protected SeekableStreamIndexTaskRunner<String, Long> createTaskRunner()
   {
@@ -158,7 +109,7 @@ public class GazetteIndexTask extends SeekableStreamIndexTask<String, Long>
       //TODO(michaelschiff): maybe there is stuff we want to configure here
       //final Map<String, Object> props = new HashMap<>(((GazetteIndexTaskIOConfig) super.ioConfig).getConsumerProperties());
       //props.put("auto.offset.reset", "none");
-      return new GazetteRecordSupplier(configMapper);
+      return new GazetteRecordSupplier(ioConfig.getBrokerEndpoint());
     }
     finally {
       Thread.currentThread().setContextClassLoader(currCtxCl);

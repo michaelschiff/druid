@@ -17,14 +17,13 @@
  * under the License.
  */
 
-package org.apache.druid.indexing.kafka.supervisor;
+package org.apache.druid.indexing.gazette.supervisor;
 
 import com.fasterxml.jackson.databind.InjectableValues;
-import com.fasterxml.jackson.databind.Module;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
-import org.apache.druid.indexing.kafka.KafkaIndexTaskClientFactory;
-import org.apache.druid.indexing.kafka.KafkaIndexTaskModule;
+import org.apache.druid.indexing.gazette.GazetteIndexTaskClientFactory;
+import org.apache.druid.indexing.gazette.GazetteIndexTaskModule;
 import org.apache.druid.indexing.overlord.IndexerMetadataStorageCoordinator;
 import org.apache.druid.indexing.overlord.TaskMaster;
 import org.apache.druid.indexing.overlord.TaskStorage;
@@ -40,11 +39,11 @@ import org.junit.Test;
 
 import java.io.IOException;
 
-public class KafkaSupervisorSpecTest
+public class GazetteSupervisorSpecTest
 {
   private final ObjectMapper mapper;
 
-  public KafkaSupervisorSpecTest()
+  public GazetteSupervisorSpecTest()
   {
     mapper = new DefaultObjectMapper();
     mapper.setInjectableValues(
@@ -52,7 +51,7 @@ public class KafkaSupervisorSpecTest
             .addValue(TaskStorage.class, null)
             .addValue(TaskMaster.class, null)
             .addValue(IndexerMetadataStorageCoordinator.class, null)
-            .addValue(KafkaIndexTaskClientFactory.class, null)
+            .addValue(GazetteIndexTaskClientFactory.class, null)
             .addValue(ObjectMapper.class, mapper)
             .addValue(ServiceEmitter.class, new NoopServiceEmitter())
             .addValue(DruidMonitorSchedulerConfig.class, null)
@@ -60,14 +59,14 @@ public class KafkaSupervisorSpecTest
             .addValue(SupervisorStateManagerConfig.class, null)
             .addValue(ExprMacroTable.class.getName(), LookupEnabledTestExprMacroTable.INSTANCE)
     );
-    mapper.registerModules((Iterable<Module>) new KafkaIndexTaskModule().getJacksonModules());
+    mapper.registerModules(new GazetteIndexTaskModule().getJacksonModules());
   }
 
   @Test
   public void testSerde() throws IOException
   {
     String json = "{\n"
-                  + "  \"type\": \"kafka\",\n"
+                  + "  \"type\": \"gazette\",\n"
                   + "  \"dataSchema\": {\n"
                   + "    \"dataSource\": \"metrics-kafka\",\n"
                   + "    \"parser\": {\n"
@@ -115,20 +114,18 @@ public class KafkaSupervisorSpecTest
                   + "    }\n"
                   + "  },\n"
                   + "  \"ioConfig\": {\n"
-                  + "    \"topic\": \"metrics\",\n"
-                  + "    \"consumerProperties\": {\n"
-                  + "      \"bootstrap.servers\": \"localhost:9092\"\n"
-                  + "    },\n"
+                  + "    \"journalPrefix\": \"metrics/\",\n"
+                  + "    \"brokerEndpoint\": \"localhost:8080\",\n"
                   + "    \"taskCount\": 1\n"
                   + "  }\n"
                   + "}";
-    KafkaSupervisorSpec spec = mapper.readValue(json, KafkaSupervisorSpec.class);
+    GazetteSupervisorSpec spec = mapper.readValue(json, GazetteSupervisorSpec.class);
 
     Assert.assertNotNull(spec);
     Assert.assertNotNull(spec.getDataSchema());
     Assert.assertEquals(4, spec.getDataSchema().getAggregators().length);
     Assert.assertNotNull(spec.getIoConfig());
-    Assert.assertEquals("metrics", spec.getIoConfig().getTopic());
+    Assert.assertEquals("metrics/", spec.getIoConfig().getJournalPrefix());
     Assert.assertNotNull(spec.getTuningConfig());
     Assert.assertNull(spec.getContext());
     Assert.assertFalse(spec.isSuspended());
@@ -140,7 +137,7 @@ public class KafkaSupervisorSpecTest
     Assert.assertTrue(serialized.contains("\"suspended\":false"));
     Assert.assertTrue(serialized.contains("\"parser\":{"));
 
-    KafkaSupervisorSpec spec2 = mapper.readValue(serialized, KafkaSupervisorSpec.class);
+    GazetteSupervisorSpec spec2 = mapper.readValue(serialized, GazetteSupervisorSpec.class);
 
     String stable = mapper.writeValueAsString(spec2);
 
@@ -151,7 +148,7 @@ public class KafkaSupervisorSpecTest
   public void testSerdeWithInputFormat() throws IOException
   {
     String json = "{\n"
-                  + "  \"type\": \"kafka\",\n"
+                  + "  \"type\": \"gazette\",\n"
                   + "  \"dataSchema\": {\n"
                   + "    \"dataSource\": \"metrics-kafka\",\n"
                   + "    \"timestampSpec\": {\n"
@@ -193,7 +190,7 @@ public class KafkaSupervisorSpecTest
                   + "    }\n"
                   + "  },\n"
                   + "  \"ioConfig\": {\n"
-                  + "    \"topic\": \"metrics\",\n"
+                  + "    \"journalPrefix\": \"metrics/\",\n"
                   + "    \"inputFormat\": {\n"
                   + "      \"type\": \"json\",\n"
                   + "      \"flattenSpec\": {\n"
@@ -202,19 +199,17 @@ public class KafkaSupervisorSpecTest
                   + "      },\n"
                   + "      \"featureSpec\": {}\n"
                   + "    },"
-                  + "    \"consumerProperties\": {\n"
-                  + "      \"bootstrap.servers\": \"localhost:9092\"\n"
-                  + "    },\n"
+                  + "    \"brokerEndpoint\": \"localhost:8080\",\n"
                   + "    \"taskCount\": 1\n"
                   + "  }\n"
                   + "}";
-    KafkaSupervisorSpec spec = mapper.readValue(json, KafkaSupervisorSpec.class);
+    GazetteSupervisorSpec spec = mapper.readValue(json, GazetteSupervisorSpec.class);
 
     Assert.assertNotNull(spec);
     Assert.assertNotNull(spec.getDataSchema());
     Assert.assertEquals(4, spec.getDataSchema().getAggregators().length);
     Assert.assertNotNull(spec.getIoConfig());
-    Assert.assertEquals("metrics", spec.getIoConfig().getTopic());
+    Assert.assertEquals("metrics/", spec.getIoConfig().getJournalPrefix());
     Assert.assertNotNull(spec.getTuningConfig());
     Assert.assertNull(spec.getContext());
     Assert.assertFalse(spec.isSuspended());
@@ -226,7 +221,7 @@ public class KafkaSupervisorSpecTest
     Assert.assertTrue(serialized.contains("\"suspended\":false"));
     Assert.assertTrue(serialized.contains("\"inputFormat\":{"));
 
-    KafkaSupervisorSpec spec2 = mapper.readValue(serialized, KafkaSupervisorSpec.class);
+    GazetteSupervisorSpec spec2 = mapper.readValue(serialized, GazetteSupervisorSpec.class);
 
     String stable = mapper.writeValueAsString(spec2);
 
@@ -237,7 +232,7 @@ public class KafkaSupervisorSpecTest
   public void testSerdeWithSpec() throws IOException
   {
     String json = "{\n"
-                  + "  \"type\": \"kafka\",\n"
+                  + "  \"type\": \"gazette\",\n"
                   + "  \"spec\": {\n"
                   + "  \"dataSchema\": {\n"
                   + "    \"dataSource\": \"metrics-kafka\",\n"
@@ -286,21 +281,19 @@ public class KafkaSupervisorSpecTest
                   + "    }\n"
                   + "  },\n"
                   + "  \"ioConfig\": {\n"
-                  + "    \"topic\": \"metrics\",\n"
-                  + "    \"consumerProperties\": {\n"
-                  + "      \"bootstrap.servers\": \"localhost:9092\"\n"
-                  + "    },\n"
+                  + "    \"journalPrefix\": \"metrics/\",\n"
+                  + "    \"brokerEndpoint\": \"localhost:8080\",\n"
                   + "    \"taskCount\": 1\n"
                   + "  }\n"
                   + "  }\n"
                   + "}";
-    KafkaSupervisorSpec spec = mapper.readValue(json, KafkaSupervisorSpec.class);
+    GazetteSupervisorSpec spec = mapper.readValue(json, GazetteSupervisorSpec.class);
 
     Assert.assertNotNull(spec);
     Assert.assertNotNull(spec.getDataSchema());
     Assert.assertEquals(4, spec.getDataSchema().getAggregators().length);
     Assert.assertNotNull(spec.getIoConfig());
-    Assert.assertEquals("metrics", spec.getIoConfig().getTopic());
+    Assert.assertEquals("metrics/", spec.getIoConfig().getJournalPrefix());
     Assert.assertNotNull(spec.getTuningConfig());
     Assert.assertNull(spec.getContext());
     Assert.assertFalse(spec.isSuspended());
@@ -312,7 +305,7 @@ public class KafkaSupervisorSpecTest
     Assert.assertTrue(serialized.contains("\"suspended\":false"));
     Assert.assertTrue(serialized.contains("\"parser\":{"));
 
-    KafkaSupervisorSpec spec2 = mapper.readValue(serialized, KafkaSupervisorSpec.class);
+    GazetteSupervisorSpec spec2 = mapper.readValue(serialized, GazetteSupervisorSpec.class);
 
     String stable = mapper.writeValueAsString(spec2);
 
@@ -323,7 +316,7 @@ public class KafkaSupervisorSpecTest
   public void testSerdeWithSpecAndInputFormat() throws IOException
   {
     String json = "{\n"
-                  + "  \"type\": \"kafka\",\n"
+                  + "  \"type\": \"gazette\",\n"
                   + "  \"spec\": {\n"
                   + "  \"dataSchema\": {\n"
                   + "    \"dataSource\": \"metrics-kafka\",\n"
@@ -366,7 +359,8 @@ public class KafkaSupervisorSpecTest
                   + "    }\n"
                   + "  },\n"
                   + "  \"ioConfig\": {\n"
-                  + "    \"topic\": \"metrics\",\n"
+                  + "    \"journalPrefix\": \"metrics/\",\n"
+                  + "    \"brokerEndpoint\": \"localhost:8080\",\n"
                   + "    \"inputFormat\": {\n"
                   + "      \"type\": \"json\",\n"
                   + "      \"flattenSpec\": {\n"
@@ -375,20 +369,17 @@ public class KafkaSupervisorSpecTest
                   + "      },\n"
                   + "      \"featureSpec\": {}\n"
                   + "    },"
-                  + "    \"consumerProperties\": {\n"
-                  + "      \"bootstrap.servers\": \"localhost:9092\"\n"
-                  + "    },\n"
                   + "    \"taskCount\": 1\n"
                   + "  }\n"
                   + "  }\n"
                   + "}";
-    KafkaSupervisorSpec spec = mapper.readValue(json, KafkaSupervisorSpec.class);
+    GazetteSupervisorSpec spec = mapper.readValue(json, GazetteSupervisorSpec.class);
 
     Assert.assertNotNull(spec);
     Assert.assertNotNull(spec.getDataSchema());
     Assert.assertEquals(4, spec.getDataSchema().getAggregators().length);
     Assert.assertNotNull(spec.getIoConfig());
-    Assert.assertEquals("metrics", spec.getIoConfig().getTopic());
+    Assert.assertEquals("metrics/", spec.getIoConfig().getJournalPrefix());
     Assert.assertNotNull(spec.getTuningConfig());
     Assert.assertNull(spec.getContext());
     Assert.assertFalse(spec.isSuspended());
@@ -400,7 +391,7 @@ public class KafkaSupervisorSpecTest
     Assert.assertTrue(serialized.contains("\"suspended\":false"));
     Assert.assertTrue(serialized.contains("\"inputFormat\":{"));
 
-    KafkaSupervisorSpec spec2 = mapper.readValue(serialized, KafkaSupervisorSpec.class);
+    GazetteSupervisorSpec spec2 = mapper.readValue(serialized, GazetteSupervisorSpec.class);
 
     String stable = mapper.writeValueAsString(spec2);
 
@@ -411,9 +402,9 @@ public class KafkaSupervisorSpecTest
   public void testSuspendResume() throws IOException
   {
     String json = "{\n"
-                  + "  \"type\": \"kafka\",\n"
+                  + "  \"type\": \"gazette\",\n"
                   + "  \"dataSchema\": {\n"
-                  + "    \"dataSource\": \"metrics-kafka\",\n"
+                  + "    \"dataSource\": \"metrics-gazette\",\n"
                   + "    \"parser\": {\n"
                   + "      \"type\": \"string\",\n"
                   + "      \"parseSpec\": {\n"
@@ -459,20 +450,18 @@ public class KafkaSupervisorSpecTest
                   + "    }\n"
                   + "  },\n"
                   + "  \"ioConfig\": {\n"
-                  + "    \"topic\": \"metrics\",\n"
-                  + "    \"consumerProperties\": {\n"
-                  + "      \"bootstrap.servers\": \"localhost:9092\"\n"
-                  + "    },\n"
+                  + "    \"journalPrefix\": \"metrics/\",\n"
+                  + "    \"brokerEndpoint\": \"localhost:8080\",\n"
                   + "    \"taskCount\": 1\n"
                   + "  }\n"
                   + "}";
-    KafkaSupervisorSpec spec = mapper.readValue(json, KafkaSupervisorSpec.class);
+    GazetteSupervisorSpec spec = mapper.readValue(json, GazetteSupervisorSpec.class);
 
     Assert.assertNotNull(spec);
     Assert.assertNotNull(spec.getDataSchema());
     Assert.assertEquals(4, spec.getDataSchema().getAggregators().length);
     Assert.assertNotNull(spec.getIoConfig());
-    Assert.assertEquals("metrics", spec.getIoConfig().getTopic());
+    Assert.assertEquals("metrics/", spec.getIoConfig().getJournalPrefix());
     Assert.assertNotNull(spec.getTuningConfig());
     Assert.assertNull(spec.getContext());
     Assert.assertFalse(spec.isSuspended());
@@ -484,13 +473,13 @@ public class KafkaSupervisorSpecTest
     Assert.assertTrue(suspendedSerialized.contains("\"indexSpec\":{"));
     Assert.assertTrue(suspendedSerialized.contains("\"suspended\":true"));
 
-    KafkaSupervisorSpec suspendedSpec = mapper.readValue(suspendedSerialized, KafkaSupervisorSpec.class);
+    GazetteSupervisorSpec suspendedSpec = mapper.readValue(suspendedSerialized, GazetteSupervisorSpec.class);
 
     Assert.assertTrue(suspendedSpec.isSuspended());
 
     String runningSerialized = mapper.writeValueAsString(spec.createRunningSpec());
 
-    KafkaSupervisorSpec runningSpec = mapper.readValue(runningSerialized, KafkaSupervisorSpec.class);
+    GazetteSupervisorSpec runningSpec = mapper.readValue(runningSerialized, GazetteSupervisorSpec.class);
 
     Assert.assertFalse(runningSpec.isSuspended());
   }

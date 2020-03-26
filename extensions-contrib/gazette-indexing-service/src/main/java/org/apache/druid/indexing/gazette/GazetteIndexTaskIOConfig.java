@@ -30,14 +30,11 @@ import org.apache.druid.indexing.seekablestream.SeekableStreamStartSequenceNumbe
 import org.joda.time.DateTime;
 
 import javax.annotation.Nullable;
-import java.util.Map;
 
 public class GazetteIndexTaskIOConfig extends SeekableStreamIndexTaskIOConfig<String, Long>
 {
   private final long pollTimeout;
-
-  //TODO(michaelschiff): this class used to reference kafka consumer properties, if we need to send gazette
-  // consumer properties around this is a place to remember to look
+  private final String brokerEndpoint;
 
   @JsonCreator
   public GazetteIndexTaskIOConfig(
@@ -46,6 +43,7 @@ public class GazetteIndexTaskIOConfig extends SeekableStreamIndexTaskIOConfig<St
       @JsonProperty("startSequenceNumbers") SeekableStreamStartSequenceNumbers<String, Long> startSequenceNumbers,
       @JsonProperty("endSequenceNumbers") SeekableStreamEndSequenceNumbers<String, Long> endSequenceNumbers,
       @JsonProperty("pollTimeout") Long pollTimeout,
+      @JsonProperty("brokerEndpoint") String brokerEndpoint,
       @JsonProperty("useTransaction") Boolean useTransaction,
       @JsonProperty("minimumMessageTime") DateTime minimumMessageTime,
       @JsonProperty("maximumMessageTime") DateTime maximumMessageTime,
@@ -63,10 +61,11 @@ public class GazetteIndexTaskIOConfig extends SeekableStreamIndexTaskIOConfig<St
         inputFormat
     );
 
+    this.brokerEndpoint = Preconditions.checkNotNull(brokerEndpoint, "brokerEndpoint");
     this.pollTimeout = pollTimeout != null ? pollTimeout : GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS;
 
     final SeekableStreamEndSequenceNumbers<String, Long> myEndSequenceNumbers = getEndSequenceNumbers();
-    for (String journal: myEndSequenceNumbers.getPartitionSequenceNumberMap().keySet()) {
+    for (String journal : myEndSequenceNumbers.getPartitionSequenceNumberMap().keySet()) {
       Preconditions.checkArgument(
           myEndSequenceNumbers.getPartitionSequenceNumberMap()
                        .get(journal)
@@ -83,6 +82,12 @@ public class GazetteIndexTaskIOConfig extends SeekableStreamIndexTaskIOConfig<St
     return pollTimeout;
   }
 
+  @JsonProperty
+  public String getBrokerEndpoint()
+  {
+    return brokerEndpoint;
+  }
+
   @Override
   public String toString()
   {
@@ -92,6 +97,7 @@ public class GazetteIndexTaskIOConfig extends SeekableStreamIndexTaskIOConfig<St
            ", startSequenceNumbers=" + getStartSequenceNumbers() +
            ", endSequenceNumbers=" + getEndSequenceNumbers() +
            ", pollTimeout=" + pollTimeout +
+           ", brokerEndPoint=" + brokerEndpoint +
            ", useTransaction=" + isUseTransaction() +
            ", minimumMessageTime=" + getMinimumMessageTime() +
            ", maximumMessageTime=" + getMaximumMessageTime() +

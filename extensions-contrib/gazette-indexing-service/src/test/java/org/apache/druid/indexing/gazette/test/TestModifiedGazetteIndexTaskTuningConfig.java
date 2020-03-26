@@ -17,12 +17,12 @@
  * under the License.
  */
 
-package org.apache.druid.indexing.kafka.test;
+package org.apache.druid.indexing.gazette.test;
 
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.annotation.JsonTypeName;
-import org.apache.druid.indexing.kafka.KafkaIndexTaskTuningConfig;
+import org.apache.druid.indexing.gazette.GazetteIndexTaskTuningConfig;
 import org.apache.druid.segment.IndexSpec;
 import org.apache.druid.segment.writeout.SegmentWriteOutMediumFactory;
 import org.joda.time.Period;
@@ -30,13 +30,13 @@ import org.joda.time.Period;
 import javax.annotation.Nullable;
 import java.io.File;
 
-@JsonTypeName("KafkaTuningConfig")
-public class TestModifiedKafkaIndexTaskTuningConfig extends KafkaIndexTaskTuningConfig
+@JsonTypeName("gazette")
+public class TestModifiedGazetteIndexTaskTuningConfig extends GazetteIndexTaskTuningConfig
 {
   private final String extra;
 
   @JsonCreator
-  public TestModifiedKafkaIndexTaskTuningConfig(
+  public TestModifiedGazetteIndexTaskTuningConfig(
       @JsonProperty("maxRowsInMemory") @Nullable Integer maxRowsInMemory,
       @JsonProperty("maxBytesInMemory") @Nullable Long maxBytesInMemory,
       @JsonProperty("maxRowsPerSegment") @Nullable Integer maxRowsPerSegment,

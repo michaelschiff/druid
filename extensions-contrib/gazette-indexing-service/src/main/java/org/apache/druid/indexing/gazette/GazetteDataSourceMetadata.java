@@ -31,10 +31,12 @@ public class GazetteDataSourceMetadata extends SeekableStreamDataSourceMetadata<
 
   @JsonCreator
   public GazetteDataSourceMetadata(
-      @JsonProperty("journals") SeekableStreamSequenceNumbers<String, Long> gazetteJournals
+         // naming this "partitions" feels weird when they are journals, but this needs to match
+         // the value in the super class for proper deserializations
+      @JsonProperty("partitions") SeekableStreamSequenceNumbers<String, Long> gazettePartitions
   )
   {
-    super(gazetteJournals);
+    super(gazettePartitions);
   }
 
   @Override

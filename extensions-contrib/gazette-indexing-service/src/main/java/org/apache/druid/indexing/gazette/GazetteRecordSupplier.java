@@ -19,115 +19,111 @@
 
 package org.apache.druid.indexing.gazette;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.michaelschiff.JournalStubFactory;
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.collect.ImmutableList;
-import org.apache.druid.indexing.kafka.supervisor.KafkaSupervisorIOConfig;
+import com.google.protobuf.ByteString;
+import dev.gazette.core.broker.protocol.JournalGrpc;
+import dev.gazette.core.broker.protocol.Protocol;
 import org.apache.druid.indexing.seekablestream.common.OrderedPartitionableRecord;
 import org.apache.druid.indexing.seekablestream.common.RecordSupplier;
 import org.apache.druid.indexing.seekablestream.common.StreamException;
 import org.apache.druid.indexing.seekablestream.common.StreamPartition;
-import org.apache.druid.java.util.common.ISE;
-import org.apache.druid.metadata.PasswordProvider;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.KafkaConsumer;
-import org.apache.kafka.common.PartitionInfo;
-import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.serialization.ByteArrayDeserializer;
-import org.apache.kafka.common.serialization.Deserializer;
 
 import javax.annotation.Nonnull;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
-import java.lang.reflect.Type;
-import java.time.Duration;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.Callable;
-import java.util.stream.Collectors;
 
 public class GazetteRecordSupplier implements RecordSupplier<String, Long>
 {
-  private final KafkaConsumer<byte[], byte[]> consumer;
   private boolean closed;
+  private JournalGrpc.JournalBlockingStub stub;
+  private Map<StreamPartition<String>, Long> pollFrom = new HashMap<>();
 
-  //TODO(michaelschiff): can pass in additional configs here if necessary
   public GazetteRecordSupplier(
-      ObjectMapper sortingMapper
+      String brokerEndpoint
   )
   {
-    this(getKafkaConsumer(sortingMapper, consumerProperties));
+    this(getJournalStub(brokerEndpoint));
   }
 
   @VisibleForTesting
-  public KafkaRecordSupplier(
-      KafkaConsumer<byte[], byte[]> consumer
+  public GazetteRecordSupplier(
+          JournalGrpc.JournalBlockingStub stub
   )
   {
-    this.consumer = consumer;
+    this.stub = stub;
   }
 
   @Override
   public void assign(Set<StreamPartition<String>> streamPartitions)
   {
-    wrapExceptions(() -> consumer.assign(streamPartitions
-                                             .stream()
-                                             .map(x -> new TopicPartition(x.getStream(), x.getPartitionId()))
-                                             .collect(Collectors.toSet())));
+    for (StreamPartition<String> partition : streamPartitions) {
+      pollFrom.put(partition, -1L);
+    }
   }
 
   @Override
   public void seek(StreamPartition<String> partition, Long sequenceNumber)
   {
-    wrapExceptions(() -> consumer.seek(
-        new TopicPartition(partition.getStream(), partition.getPartitionId()),
-        sequenceNumber
-    ));
+    pollFrom.put(partition, sequenceNumber);
   }
 
   @Override
   public void seekToEarliest(Set<StreamPartition<String>> partitions)
   {
-    wrapExceptions(() -> consumer.seekToBeginning(partitions
-                                                      .stream()
-                                                      .map(e -> new TopicPartition(e.getStream(), e.getPartitionId()))
-                                                      .collect(Collectors.toList())));
+    for (StreamPartition<String> partition : partitions) {
+      pollFrom.put(partition, 0L); //TODO(michaelschiff): this is likely incorrect
+    }
   }
 
   @Override
   public void seekToLatest(Set<StreamPartition<String>> partitions)
   {
-    wrapExceptions(() -> consumer.seekToEnd(partitions
-                                                .stream()
-                                                .map(e -> new TopicPartition(e.getStream(), e.getPartitionId()))
-                                                .collect(Collectors.toList())));
+    for (StreamPartition<String> partition : partitions) {
+      pollFrom.put(partition, -1L);
+    }
   }
 
   @Override
   public Set<StreamPartition<String>> getAssignment()
   {
-    return wrapExceptions(() -> consumer.assignment()
-                                        .stream()
-                                        .map(e -> new StreamPartition<>(e.topic(), e.partition()))
-                                        .collect(Collectors.toSet()));
+    return pollFrom.keySet();
   }
 
   @Nonnull
   @Override
   public List<OrderedPartitionableRecord<String, Long>> poll(long timeout)
   {
-    List<OrderedPartitionableRecord<Integer, Long>> polledRecords = new ArrayList<>();
-    for (ConsumerRecord<byte[], byte[]> record : consumer.poll(Duration.ofMillis(timeout))) {
-      polledRecords.add(new OrderedPartitionableRecord<>(
-          record.topic(),
-          record.partition(),
-          record.offset(),
-          record.value() == null ? null : ImmutableList.of(record.value())
-      ));
+    List<OrderedPartitionableRecord<String, Long>> polledRecords = new ArrayList<>();
+    for (StreamPartition<String> partition : pollFrom.keySet()) {
+      long offset = pollFrom.get(partition);
+      Protocol.ReadRequest readRequest = Protocol.ReadRequest.newBuilder()
+              .setJournal(partition.getPartitionId())
+              .setOffset(offset)
+              .build();
+      Iterator<Protocol.ReadResponse> responseIter = stub.read(readRequest);
+      while (responseIter.hasNext()) {
+        Protocol.ReadResponse r = responseIter.next();
+        ByteString content = r.getContent();
+        if (!content.isEmpty()) {
+          offset = r.getOffset();
+          String[] recs = content.toStringUtf8().split("\n");
+          List<byte[]> recBytes = new ArrayList<>();
+          for (String rec : recs) {
+            recBytes.add(rec.getBytes(StandardCharsets.UTF_8));
+          }
+          polledRecords.add(new OrderedPartitionableRecord<>(partition.getStream(), partition.getPartitionId(), offset, recBytes));
+        }
+      }
+      pollFrom.put(partition, offset);
     }
     return polledRecords;
   }
@@ -155,22 +151,29 @@ public class GazetteRecordSupplier implements RecordSupplier<String, Long>
   @Override
   public Long getPosition(StreamPartition<String> partition)
   {
-    return wrapExceptions(() -> consumer.position(new TopicPartition(
-        partition.getStream(),
-        partition.getPartitionId()
-    )));
+    return pollFrom.get(partition);
   }
 
   @Override
   public Set<String> getPartitionIds(String stream)
   {
-    return wrapExceptions(() -> {
-      List<PartitionInfo> partitions = consumer.partitionsFor(stream);
-      if (partitions == null) {
-        throw new ISE("Topic [%s] is not found in KafkaConsumer's list of topics", stream);
-      }
-      return partitions.stream().map(PartitionInfo::partition).collect(Collectors.toSet());
-    });
+    Protocol.ListRequest listReq = Protocol.ListRequest.newBuilder()
+            .setSelector(Protocol.LabelSelector.newBuilder()
+                    .setInclude(Protocol.LabelSet.newBuilder().addLabels(
+                            Protocol.Label.newBuilder()
+                                    .setName("prefix")
+                                    .setValue(stream)
+                                    .build())
+                            .build())
+                    .build())
+            .build();
+    Set<String> res = new HashSet<>();
+    Protocol.ListResponse list = stub.list(listReq);
+    List<Protocol.ListResponse.Journal> journalsList = list.getJournalsList();
+    for (Protocol.ListResponse.Journal journal : journalsList) {
+      res.add(journal.getSpec().getName());
+    }
+    return res;
   }
 
   @Override
@@ -180,76 +183,11 @@ public class GazetteRecordSupplier implements RecordSupplier<String, Long>
       return;
     }
     closed = true;
-    consumer.close();
   }
 
-  public static void addConsumerPropertiesFromConfig(
-      Properties properties,
-      ObjectMapper configMapper,
-      Map<String, Object> consumerProperties
-  )
+  private static JournalGrpc.JournalBlockingStub getJournalStub(String brokerEndpoint)
   {
-    // Extract passwords before SSL connection to Kafka
-    for (Map.Entry<String, Object> entry : consumerProperties.entrySet()) {
-      String propertyKey = entry.getKey();
-      if (propertyKey.equals(KafkaSupervisorIOConfig.TRUST_STORE_PASSWORD_KEY)
-          || propertyKey.equals(KafkaSupervisorIOConfig.KEY_STORE_PASSWORD_KEY)
-          || propertyKey.equals(KafkaSupervisorIOConfig.KEY_PASSWORD_KEY)) {
-        PasswordProvider configPasswordProvider = configMapper.convertValue(
-            entry.getValue(),
-            PasswordProvider.class
-        );
-        properties.setProperty(propertyKey, configPasswordProvider.getPassword());
-      } else {
-        properties.setProperty(propertyKey, String.valueOf(entry.getValue()));
-      }
-    }
-  }
-
-  private static Deserializer getKafkaDeserializer(Properties properties, String kafkaConfigKey)
-  {
-    Deserializer deserializerObject;
-    try {
-      Class deserializerClass = Class.forName(properties.getProperty(
-          kafkaConfigKey,
-          ByteArrayDeserializer.class.getTypeName()
-      ));
-      Method deserializerMethod = deserializerClass.getMethod("deserialize", String.class, byte[].class);
-
-      Type deserializerReturnType = deserializerMethod.getGenericReturnType();
-
-      if (deserializerReturnType == byte[].class) {
-        deserializerObject = (Deserializer) deserializerClass.getConstructor().newInstance();
-      } else {
-        throw new IllegalArgumentException("Kafka deserializers must return a byte array (byte[]), " +
-                                           deserializerClass.getName() + " returns " +
-                                           deserializerReturnType.getTypeName());
-      }
-    }
-    catch (ClassNotFoundException | NoSuchMethodException | InstantiationException | IllegalAccessException | InvocationTargetException e) {
-      throw new StreamException(e);
-    }
-    return deserializerObject;
-  }
-
-  private static KafkaConsumer<byte[], byte[]> getKafkaConsumer(ObjectMapper sortingMapper, Map<String, Object> consumerProperties)
-  {
-    final Map<String, Object> consumerConfigs = KafkaConsumerConfigs.getConsumerProperties();
-    final Properties props = new Properties();
-    addConsumerPropertiesFromConfig(props, sortingMapper, consumerProperties);
-    props.putAll(consumerConfigs);
-
-    ClassLoader currCtxCl = Thread.currentThread().getContextClassLoader();
-    try {
-      Thread.currentThread().setContextClassLoader(KafkaRecordSupplier.class.getClassLoader());
-      Deserializer keyDeserializerObject = getKafkaDeserializer(props, "key.deserializer");
-      Deserializer valueDeserializerObject = getKafkaDeserializer(props, "value.deserializer");
-
-      return new KafkaConsumer<>(props, keyDeserializerObject, valueDeserializerObject);
-    }
-    finally {
-      Thread.currentThread().setContextClassLoader(currCtxCl);
-    }
+    return JournalStubFactory.newBlockingStub(brokerEndpoint);
   }
 
   private static <T> T wrapExceptions(Callable<T> callable)

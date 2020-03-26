@@ -17,7 +17,7 @@
  * under the License.
  */
 
-package org.apache.druid.indexing.kafka;
+package org.apache.druid.indexing.gazette;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -28,15 +28,15 @@ import org.junit.Test;
 
 import java.util.Map;
 
-public class KafkaDataSourceMetadataTest
+public class GazetteDataSourceMetadataTest
 {
-  private static final KafkaDataSourceMetadata START0 = startMetadata(ImmutableMap.of());
-  private static final KafkaDataSourceMetadata START1 = startMetadata(ImmutableMap.of(0, 2L, 1, 3L));
-  private static final KafkaDataSourceMetadata START2 = startMetadata(ImmutableMap.of(0, 2L, 1, 4L, 2, 5L));
-  private static final KafkaDataSourceMetadata START3 = startMetadata(ImmutableMap.of(0, 2L, 2, 5L));
-  private static final KafkaDataSourceMetadata END0 = endMetadata(ImmutableMap.of());
-  private static final KafkaDataSourceMetadata END1 = endMetadata(ImmutableMap.of(0, 2L, 2, 5L));
-  private static final KafkaDataSourceMetadata END2 = endMetadata(ImmutableMap.of(0, 2L, 1, 4L));
+  private static final GazetteDataSourceMetadata START0 = startMetadata(ImmutableMap.of());
+  private static final GazetteDataSourceMetadata START1 = startMetadata(ImmutableMap.of("topic/part-000", 2L, "topic/part-001", 3L));
+  private static final GazetteDataSourceMetadata START2 = startMetadata(ImmutableMap.of("topic/part-000", 2L, "topic/part-001", 4L, "topic/part-002", 5L));
+  private static final GazetteDataSourceMetadata START3 = startMetadata(ImmutableMap.of("topic/part-000", 2L, "topic/part-002", 5L));
+  private static final GazetteDataSourceMetadata END0 = endMetadata(ImmutableMap.of());
+  private static final GazetteDataSourceMetadata END1 = endMetadata(ImmutableMap.of("topic/part-000", 2L, "topic/part-002", 5L));
+  private static final GazetteDataSourceMetadata END2 = endMetadata(ImmutableMap.of("topic/part-000", 2L, "topic/part-001", 4L));
 
   @Test
   public void testMatches()
@@ -87,37 +87,37 @@ public class KafkaDataSourceMetadataTest
   public void testPlus()
   {
     Assert.assertEquals(
-        startMetadata(ImmutableMap.of(0, 2L, 1, 3L, 2, 5L)),
+        startMetadata(ImmutableMap.of("topic/part-000", 2L, "topic/part-001", 3L, "topic/part-002", 5L)),
         START1.plus(START3)
     );
 
     Assert.assertEquals(
-        startMetadata(ImmutableMap.of(0, 2L, 1, 4L, 2, 5L)),
+        startMetadata(ImmutableMap.of("topic/part-000", 2L, "topic/part-001", 4L, "topic/part-002", 5L)),
         START0.plus(START2)
     );
 
     Assert.assertEquals(
-        startMetadata(ImmutableMap.of(0, 2L, 1, 4L, 2, 5L)),
+        startMetadata(ImmutableMap.of("topic/part-000", 2L, "topic/part-001", 4L, "topic/part-002", 5L)),
         START1.plus(START2)
     );
 
     Assert.assertEquals(
-        startMetadata(ImmutableMap.of(0, 2L, 1, 3L, 2, 5L)),
+        startMetadata(ImmutableMap.of("topic/part-000", 2L, "topic/part-001", 3L, "topic/part-002", 5L)),
         START2.plus(START1)
     );
 
     Assert.assertEquals(
-        startMetadata(ImmutableMap.of(0, 2L, 1, 4L, 2, 5L)),
+        startMetadata(ImmutableMap.of("topic/part-000", 2L, "topic/part-001", 4L, "topic/part-002", 5L)),
         START2.plus(START2)
     );
 
     Assert.assertEquals(
-        endMetadata(ImmutableMap.of(0, 2L, 2, 5L)),
+        endMetadata(ImmutableMap.of("topic/part-000", 2L, "topic/part-002", 5L)),
         END0.plus(END1)
     );
 
     Assert.assertEquals(
-        endMetadata(ImmutableMap.of(0, 2L, 1, 4L, 2, 5L)),
+        endMetadata(ImmutableMap.of("topic/part-000", 2L, "topic/part-001", 4L, "topic/part-002", 5L)),
         END1.plus(END2)
     );
   }
@@ -126,7 +126,7 @@ public class KafkaDataSourceMetadataTest
   public void testMinus()
   {
     Assert.assertEquals(
-        startMetadata(ImmutableMap.of(1, 3L)),
+        startMetadata(ImmutableMap.of("topic/part-001", 3L)),
         START1.minus(START3)
     );
 
@@ -141,7 +141,7 @@ public class KafkaDataSourceMetadataTest
     );
 
     Assert.assertEquals(
-        startMetadata(ImmutableMap.of(2, 5L)),
+        startMetadata(ImmutableMap.of("topic/part-002", 5L)),
         START2.minus(START1)
     );
 
@@ -151,23 +151,23 @@ public class KafkaDataSourceMetadataTest
     );
 
     Assert.assertEquals(
-        endMetadata(ImmutableMap.of(1, 4L)),
+        endMetadata(ImmutableMap.of("topic/part-001", 4L)),
         END2.minus(END1)
     );
 
     Assert.assertEquals(
-        endMetadata(ImmutableMap.of(2, 5L)),
+        endMetadata(ImmutableMap.of("topic/part-002", 5L)),
         END1.minus(END2)
     );
   }
 
-  private static KafkaDataSourceMetadata startMetadata(Map<Integer, Long> offsets)
+  private static GazetteDataSourceMetadata startMetadata(Map<String, Long> offsets)
   {
-    return new KafkaDataSourceMetadata(new SeekableStreamStartSequenceNumbers<>("foo", offsets, ImmutableSet.of()));
+    return new GazetteDataSourceMetadata(new SeekableStreamStartSequenceNumbers<>("foo", offsets, ImmutableSet.of()));
   }
 
-  private static KafkaDataSourceMetadata endMetadata(Map<Integer, Long> offsets)
+  private static GazetteDataSourceMetadata endMetadata(Map<String, Long> offsets)
   {
-    return new KafkaDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>("foo", offsets));
+    return new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>("foo", offsets));
   }
 }

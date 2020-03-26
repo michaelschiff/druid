@@ -17,11 +17,11 @@
  * under the License.
  */
 
-package org.apache.druid.indexing.kafka.supervisor;
+package org.apache.druid.indexing.gazette.supervisor;
 
 import com.fasterxml.jackson.databind.Module;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.druid.indexing.kafka.KafkaIndexTaskModule;
+import org.apache.druid.indexing.gazette.GazetteIndexTaskModule;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.segment.IndexSpec;
 import org.apache.druid.segment.data.CompressionStrategy;
@@ -33,22 +33,22 @@ import org.junit.Test;
 
 import java.io.File;
 
-public class KafkaSupervisorTuningConfigTest
+public class GazetteSupervisorTuningConfigTest
 {
   private final ObjectMapper mapper;
 
-  public KafkaSupervisorTuningConfigTest()
+  public GazetteSupervisorTuningConfigTest()
   {
     mapper = new DefaultObjectMapper();
-    mapper.registerModules((Iterable<Module>) new KafkaIndexTaskModule().getJacksonModules());
+    mapper.registerModules((Iterable<Module>) new GazetteIndexTaskModule().getJacksonModules());
   }
 
   @Test
   public void testSerdeWithDefaults() throws Exception
   {
-    String jsonStr = "{\"type\": \"kafka\"}";
+    String jsonStr = "{\"type\": \"gazette\"}";
 
-    KafkaSupervisorTuningConfig config = (KafkaSupervisorTuningConfig) mapper.readValue(
+    GazetteSupervisorTuningConfig config = (GazetteSupervisorTuningConfig) mapper.readValue(
         mapper.writeValueAsString(
             mapper.readValue(
                 jsonStr,
@@ -79,7 +79,7 @@ public class KafkaSupervisorTuningConfigTest
   public void testSerdeWithNonDefaults() throws Exception
   {
     String jsonStr = "{\n"
-                     + "  \"type\": \"kafka\",\n"
+                     + "  \"type\": \"gazette\",\n"
                      + "  \"basePersistDirectory\": \"/tmp/xxx\",\n"
                      + "  \"maxRowsInMemory\": 100,\n"
                      + "  \"maxRowsPerSegment\": 100,\n"
@@ -97,7 +97,7 @@ public class KafkaSupervisorTuningConfigTest
                      + "  \"indexSpecForIntermediatePersists\": { \"dimensionCompression\" : \"uncompressed\" }\n"
                      + "}";
 
-    KafkaSupervisorTuningConfig config = (KafkaSupervisorTuningConfig) mapper.readValue(
+    GazetteSupervisorTuningConfig config = (GazetteSupervisorTuningConfig) mapper.readValue(
         mapper.writeValueAsString(
             mapper.readValue(
                 jsonStr,

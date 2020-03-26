@@ -28,13 +28,13 @@ import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
 import org.apache.druid.indexing.common.task.Task;
 import org.apache.druid.indexing.common.task.TaskResource;
 import org.apache.druid.indexing.common.task.utils.RandomIdUtils;
-import org.apache.druid.indexing.kafka.KafkaDataSourceMetadata;
-import org.apache.druid.indexing.kafka.KafkaIndexTask;
-import org.apache.druid.indexing.kafka.KafkaIndexTaskClientFactory;
-import org.apache.druid.indexing.kafka.KafkaIndexTaskIOConfig;
-import org.apache.druid.indexing.kafka.KafkaIndexTaskTuningConfig;
-import org.apache.druid.indexing.kafka.KafkaRecordSupplier;
-import org.apache.druid.indexing.kafka.KafkaSequenceNumber;
+import org.apache.druid.indexing.gazette.GazetteDataSourceMetadata;
+import org.apache.druid.indexing.gazette.GazetteIndexTask;
+import org.apache.druid.indexing.gazette.GazetteIndexTaskClientFactory;
+import org.apache.druid.indexing.gazette.GazetteIndexTaskIOConfig;
+import org.apache.druid.indexing.gazette.GazetteIndexTaskTuningConfig;
+import org.apache.druid.indexing.gazette.GazetteRecordSupplier;
+import org.apache.druid.indexing.gazette.GazetteSequenceNumber;
 import org.apache.druid.indexing.overlord.DataSourceMetadata;
 import org.apache.druid.indexing.overlord.IndexerMetadataStorageCoordinator;
 import org.apache.druid.indexing.overlord.TaskMaster;
@@ -123,14 +123,15 @@ public class GazetteSupervisor extends SeekableStreamSupervisor<String, Long>
   @Override
   protected RecordSupplier<String, Long> setupRecordSupplier()
   {
-    return new GazetteRecordSupplier(spec.getIoConfig(), sortingMapper);
+    return new GazetteRecordSupplier(
+            spec.getIoConfig().getBrokerEndpoint()
+    );
   }
 
   @Override
   protected int getTaskGroupIdForPartition(String partitionId)
   {
-    //TODO(michaelschif)
-    return 0;//partitionId % spec.getIoConfig().getTaskCount();
+    return Math.abs(partitionId.hashCode()) % spec.getIoConfig().getTaskCount();
   }
 
   @Override
@@ -191,6 +192,7 @@ public class GazetteSupervisor extends SeekableStreamSupervisor<String, Long>
         new SeekableStreamStartSequenceNumbers<>(gazetteIoConfig.getJournalPrefix(), startPartitions, Collections.emptySet()),
         new SeekableStreamEndSequenceNumbers<>(gazetteIoConfig.getJournalPrefix(), endPartitions),
             gazetteIoConfig.getPollTimeout(),
+        ((GazetteSupervisorIOConfig) ioConfig).getBrokerEndpoint(),
         true,
         minimumMessageTime,
         maximumMessageTime,
@@ -218,7 +220,7 @@ public class GazetteSupervisor extends SeekableStreamSupervisor<String, Long>
     List<SeekableStreamIndexTask<String, Long>> taskList = new ArrayList<>();
     for (int i = 0; i < replicas; i++) {
       String taskId = Joiner.on("_").join(baseSequenceName, RandomIdUtils.getRandomId());
-      taskList.add(new KafkaIndexTask(
+      taskList.add(new GazetteIndexTask(
           taskId,
           new TaskResource(baseSequenceName, 1),
           spec.getDataSchema(),
@@ -347,7 +349,7 @@ public class GazetteSupervisor extends SeekableStreamSupervisor<String, Long>
   @Override
   protected String baseTaskName()
   {
-    return "index_kafka";
+    return "index_gazette";
   }
 
   @Override

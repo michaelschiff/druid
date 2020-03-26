@@ -17,14 +17,11 @@
  * under the License.
  */
 
-package org.apache.druid.indexing.kafka.supervisor;
+package org.apache.druid.indexing.gazette.supervisor;
 
 import com.fasterxml.jackson.databind.JsonMappingException;
-import com.fasterxml.jackson.databind.Module;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.collect.ImmutableMap;
-import org.apache.druid.indexing.kafka.KafkaIndexTaskModule;
-import org.apache.druid.indexing.kafka.KafkaRecordSupplier;
+import org.apache.druid.indexing.gazette.GazetteIndexTaskModule;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.java.util.common.DateTimes;
 import org.hamcrest.CoreMatchers;
@@ -34,16 +31,14 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
 
-import java.util.Properties;
-
-public class KafkaSupervisorIOConfigTest
+public class GazetteSupervisorIOConfigTest
 {
   private final ObjectMapper mapper;
 
-  public KafkaSupervisorIOConfigTest()
+  public GazetteSupervisorIOConfigTest()
   {
     mapper = new DefaultObjectMapper();
-    mapper.registerModules((Iterable<Module>) new KafkaIndexTaskModule().getJacksonModules());
+    mapper.registerModules(new GazetteIndexTaskModule().getJacksonModules());
   }
 
   @Rule
@@ -53,25 +48,25 @@ public class KafkaSupervisorIOConfigTest
   public void testSerdeWithDefaults() throws Exception
   {
     String jsonStr = "{\n"
-                     + "  \"type\": \"kafka\",\n"
-                     + "  \"topic\": \"my-topic\",\n"
-                     + "  \"consumerProperties\": {\"bootstrap.servers\":\"localhost:9092\"}\n"
-                     + "}";
+                     + "  \"type\": \"gazette\",\n"
+                     + "  \"journalPrefix\": \"test/\",\n"
+                     + "  \"brokerEndpoint\": \"localhost:8080\"\n"
+            + "}";
 
-    KafkaSupervisorIOConfig config = mapper.readValue(
+    GazetteSupervisorIOConfig config = mapper.readValue(
         mapper.writeValueAsString(
             mapper.readValue(
                 jsonStr,
-                KafkaSupervisorIOConfig.class
+                GazetteSupervisorIOConfig.class
             )
-        ), KafkaSupervisorIOConfig.class
+        ), GazetteSupervisorIOConfig.class
     );
 
-    Assert.assertEquals("my-topic", config.getTopic());
+    Assert.assertEquals("test/", config.getJournalPrefix());
     Assert.assertEquals(1, (int) config.getReplicas());
     Assert.assertEquals(1, (int) config.getTaskCount());
     Assert.assertEquals(Duration.standardMinutes(60), config.getTaskDuration());
-    Assert.assertEquals(ImmutableMap.of("bootstrap.servers", "localhost:9092"), config.getConsumerProperties());
+    Assert.assertEquals("localhost:8080", config.getBrokerEndpoint());
     Assert.assertEquals(100, config.getPollTimeout());
     Assert.assertEquals(Duration.standardSeconds(5), config.getStartDelay());
     Assert.assertEquals(Duration.standardSeconds(30), config.getPeriod());
@@ -86,12 +81,12 @@ public class KafkaSupervisorIOConfigTest
   public void testSerdeWithNonDefaultsWithLateMessagePeriod() throws Exception
   {
     String jsonStr = "{\n"
-        + "  \"type\": \"kafka\",\n"
-        + "  \"topic\": \"my-topic\",\n"
+        + "  \"type\": \"gazette\",\n"
+        + "  \"brokerEndpoint\": \"localhost:8080\",\n"
+        + "  \"journalPrefix\": \"test/\",\n"
         + "  \"replicas\": 3,\n"
         + "  \"taskCount\": 9,\n"
         + "  \"taskDuration\": \"PT30M\",\n"
-        + "  \"consumerProperties\": {\"bootstrap.servers\":\"localhost:9092\"},\n"
         + "  \"pollTimeout\": 1000,\n"
         + "  \"startDelay\": \"PT1M\",\n"
         + "  \"period\": \"PT10S\",\n"
@@ -101,20 +96,20 @@ public class KafkaSupervisorIOConfigTest
         + "  \"earlyMessageRejectionPeriod\": \"PT1H\"\n"
         + "}";
 
-    KafkaSupervisorIOConfig config = mapper.readValue(
+    GazetteSupervisorIOConfig config = mapper.readValue(
         mapper.writeValueAsString(
             mapper.readValue(
                 jsonStr,
-                KafkaSupervisorIOConfig.class
+                GazetteSupervisorIOConfig.class
                 )
-            ), KafkaSupervisorIOConfig.class
+            ), GazetteSupervisorIOConfig.class
         );
 
-    Assert.assertEquals("my-topic", config.getTopic());
+    Assert.assertEquals("test/", config.getJournalPrefix());
+    Assert.assertEquals("localhost:8080", config.getBrokerEndpoint());
     Assert.assertEquals(3, (int) config.getReplicas());
     Assert.assertEquals(9, (int) config.getTaskCount());
     Assert.assertEquals(Duration.standardMinutes(30), config.getTaskDuration());
-    Assert.assertEquals(ImmutableMap.of("bootstrap.servers", "localhost:9092"), config.getConsumerProperties());
     Assert.assertEquals(1000, config.getPollTimeout());
     Assert.assertEquals(Duration.standardMinutes(1), config.getStartDelay());
     Assert.assertEquals(Duration.standardSeconds(10), config.getPeriod());
@@ -128,12 +123,12 @@ public class KafkaSupervisorIOConfigTest
   public void testSerdeWithNonDefaultsWithLateMessageStartDateTime() throws Exception
   {
     String jsonStr = "{\n"
-        + "  \"type\": \"kafka\",\n"
-        + "  \"topic\": \"my-topic\",\n"
+        + "  \"type\": \"gazette\",\n"
+        + "  \"brokerEndpoint\": \"localhost:8080\",\n"
+        + "  \"journalPrefix\": \"test/\",\n"
         + "  \"replicas\": 3,\n"
         + "  \"taskCount\": 9,\n"
         + "  \"taskDuration\": \"PT30M\",\n"
-        + "  \"consumerProperties\": {\"bootstrap.servers\":\"localhost:9092\"},\n"
         + "  \"pollTimeout\": 1000,\n"
         + "  \"startDelay\": \"PT1M\",\n"
         + "  \"period\": \"PT10S\",\n"
@@ -143,20 +138,20 @@ public class KafkaSupervisorIOConfigTest
         + "  \"lateMessageRejectionStartDateTime\": \"2016-05-31T12:00Z\"\n"
         + "}";
 
-    KafkaSupervisorIOConfig config = mapper.readValue(
+    GazetteSupervisorIOConfig config = mapper.readValue(
         mapper.writeValueAsString(
             mapper.readValue(
                 jsonStr,
-                KafkaSupervisorIOConfig.class
+                GazetteSupervisorIOConfig.class
                 )
-            ), KafkaSupervisorIOConfig.class
+            ), GazetteSupervisorIOConfig.class
         );
 
-    Assert.assertEquals("my-topic", config.getTopic());
+    Assert.assertEquals("test/", config.getJournalPrefix());
+    Assert.assertEquals("localhost:8080", config.getBrokerEndpoint());
     Assert.assertEquals(3, (int) config.getReplicas());
     Assert.assertEquals(9, (int) config.getTaskCount());
     Assert.assertEquals(Duration.standardMinutes(30), config.getTaskDuration());
-    Assert.assertEquals(ImmutableMap.of("bootstrap.servers", "localhost:9092"), config.getConsumerProperties());
     Assert.assertEquals(1000, config.getPollTimeout());
     Assert.assertEquals(Duration.standardMinutes(1), config.getStartDelay());
     Assert.assertEquals(Duration.standardSeconds(10), config.getPeriod());
@@ -166,81 +161,42 @@ public class KafkaSupervisorIOConfigTest
   }
 
   @Test
-  public void testSerdeForConsumerPropertiesWithPasswords() throws Exception
+  public void testJournalPrefixRequired() throws Exception
   {
     String jsonStr = "{\n"
-                     + "  \"type\": \"kafka\",\n"
-                     + "  \"topic\": \"my-topic\",\n"
-                     + "  \"consumerProperties\": {\"bootstrap.servers\":\"localhost:9092\",\n"
-                     + "   \"ssl.truststore.password\":{\"type\": \"default\", \"password\": \"mytruststorepassword\"},\n"
-                     + "   \"ssl.keystore.password\":{\"type\": \"default\", \"password\": \"mykeystorepassword\"},\n"
-                     + "   \"ssl.key.password\":\"mykeypassword\"}\n"
-                     + "}";
-
-    KafkaSupervisorIOConfig config = mapper.readValue(jsonStr, KafkaSupervisorIOConfig.class);
-    Properties props = new Properties();
-    KafkaRecordSupplier.addConsumerPropertiesFromConfig(props, mapper, config.getConsumerProperties());
-
-    Assert.assertEquals("my-topic", config.getTopic());
-    Assert.assertEquals("localhost:9092", props.getProperty("bootstrap.servers"));
-    Assert.assertEquals("mytruststorepassword", props.getProperty("ssl.truststore.password"));
-    Assert.assertEquals("mykeystorepassword", props.getProperty("ssl.keystore.password"));
-    Assert.assertEquals("mykeypassword", props.getProperty("ssl.key.password"));
-  }
-
-  @Test
-  public void testTopicRequired() throws Exception
-  {
-    String jsonStr = "{\n"
-                     + "  \"type\": \"kafka\",\n"
-                     + "  \"consumerProperties\": {\"bootstrap.servers\":\"localhost:9092\"}\n"
+                     + "  \"type\": \"gazette\"\n"
                      + "}";
 
     exception.expect(JsonMappingException.class);
     exception.expectCause(CoreMatchers.isA(NullPointerException.class));
-    exception.expectMessage(CoreMatchers.containsString("topic"));
-    mapper.readValue(jsonStr, KafkaSupervisorIOConfig.class);
+    exception.expectMessage(CoreMatchers.containsString("journalPrefix"));
+    mapper.readValue(jsonStr, GazetteSupervisorIOConfig.class);
   }
 
   @Test
-  public void testConsumerPropertiesRequired() throws Exception
+  public void testBrokerEndpointRequired() throws Exception
   {
     String jsonStr = "{\n"
                      + "  \"type\": \"kafka\",\n"
-                     + "  \"topic\": \"my-topic\"\n"
+                     + "  \"journalPrefix\": \"test/\"\n"
                      + "}";
 
     exception.expect(JsonMappingException.class);
     exception.expectCause(CoreMatchers.isA(NullPointerException.class));
-    exception.expectMessage(CoreMatchers.containsString("consumerProperties"));
-    mapper.readValue(jsonStr, KafkaSupervisorIOConfig.class);
-  }
-
-  @Test
-  public void testBootstrapServersRequired() throws Exception
-  {
-    String jsonStr = "{\n"
-        + "  \"type\": \"kafka\",\n"
-        + "  \"topic\": \"my-topic\",\n"
-        + "  \"consumerProperties\": {}\n"
-        + "}";
-
-    exception.expect(JsonMappingException.class);
-    exception.expectCause(CoreMatchers.isA(NullPointerException.class));
-    exception.expectMessage(CoreMatchers.containsString("bootstrap.servers"));
-    mapper.readValue(jsonStr, KafkaSupervisorIOConfig.class);
+    exception.expectMessage(CoreMatchers.containsString("brokerEndpoint"));
+    mapper.readValue(jsonStr, GazetteSupervisorIOConfig.class);
   }
 
   @Test
   public void testSerdeWithBothExclusiveProperties() throws Exception
   {
     String jsonStr = "{\n"
-        + "  \"type\": \"kafka\",\n"
-        + "  \"topic\": \"my-topic\",\n"
+        + "  \"type\": \"gazette\",\n"
+        + "  \"journalPrefix\": \"test/\",\n"
+        + "  \"brokerEndpoint\": \"localhost:8080\",\n"
         + "  \"replicas\": 3,\n"
         + "  \"taskCount\": 9,\n"
         + "  \"taskDuration\": \"PT30M\",\n"
-        + "  \"consumerProperties\": {\"bootstrap.servers\":\"localhost:9092\"},\n"
         + "  \"pollTimeout\": 1000,\n"
         + "  \"startDelay\": \"PT1M\",\n"
         + "  \"period\": \"PT10S\",\n"
@@ -251,13 +207,13 @@ public class KafkaSupervisorIOConfigTest
         + "  \"lateMessageRejectionStartDateTime\": \"2016-05-31T12:00Z\"\n"
         + "}";
     exception.expect(JsonMappingException.class);
-    KafkaSupervisorIOConfig config = mapper.readValue(
+    GazetteSupervisorIOConfig config = mapper.readValue(
         mapper.writeValueAsString(
             mapper.readValue(
                 jsonStr,
-                KafkaSupervisorIOConfig.class
+                GazetteSupervisorIOConfig.class
                 )
-            ), KafkaSupervisorIOConfig.class
+            ), GazetteSupervisorIOConfig.class
         );
   }
 }

@@ -35,26 +35,21 @@ import org.apache.druid.indexing.seekablestream.common.OrderedPartitionableRecor
 import org.apache.druid.indexing.seekablestream.common.OrderedSequenceNumber;
 import org.apache.druid.indexing.seekablestream.common.RecordSupplier;
 import org.apache.druid.indexing.seekablestream.common.StreamPartition;
-import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.segment.realtime.appenderator.AppenderatorsManager;
 import org.apache.druid.segment.realtime.firehose.ChatHandlerProvider;
 import org.apache.druid.server.security.AuthorizerMapper;
 import org.apache.druid.utils.CircularBuffer;
-import org.apache.druid.utils.CollectionUtils;
 
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import javax.validation.constraints.NotNull;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Kafka indexing task runner supporting incremental segments publishing
@@ -99,21 +94,9 @@ public class IncrementalPublishingGazetteIndexTaskRunner extends SeekableStreamI
   protected List<OrderedPartitionableRecord<String, Long>> getRecords(
       RecordSupplier<String, Long> recordSupplier,
       TaskToolbox toolbox
-  ) throws Exception
+  )
   {
-    // Handles OffsetOutOfRangeException, which is thrown if the seeked-to
-    // offset is not present in the topic-partition. This can happen if we're asking a task to read from data
-    // that has not been written yet (which is totally legitimate). So let's wait for it to show up.
-    List<OrderedPartitionableRecord<String, Long>> records = new ArrayList<>();
-    try {
-      records = recordSupplier.poll(task.getIOConfig().getPollTimeout());
-    }
-    catch (OffsetOutOfRangeException e) {
-      log.warn("OffsetOutOfRangeException with message [%s]", e.getMessage());
-      possiblyResetOffsetsOrWait(e.offsetOutOfRangePartitions(), recordSupplier, toolbox);
-    }
-
-    return records;
+    return recordSupplier.poll(task.getIOConfig().getPollTimeout());
   }
 
   @Override
@@ -128,59 +111,6 @@ public class IncrementalPublishingGazetteIndexTaskRunner extends SeekableStreamI
         Integer.class,
         Long.class
     ));
-  }
-
-  private void possiblyResetOffsetsOrWait(
-      Map<String, Long> outOfRangePartitions,
-      RecordSupplier<String, Long> recordSupplier,
-      TaskToolbox taskToolbox
-  ) throws InterruptedException, IOException
-  {
-    final Map<String, Long> resetPartitions = new HashMap<>();
-    boolean doReset = false;
-    if (task.getTuningConfig().isResetOffsetAutomatically()) {
-      for (Map.Entry<String, Long> outOfRangePartition : outOfRangePartitions.entrySet()) {
-        final String journal = outOfRangePartition.getKey();
-        final long nextOffset = outOfRangePartition.getValue();
-        // seek to the beginning to get the least available offset
-        StreamPartition<String> streamPartition = StreamPartition.of(journal, journal); //TODO(michaelschiff): this is weird
-        final Long leastAvailableOffset = recordSupplier.getEarliestSequenceNumber(streamPartition);
-        if (leastAvailableOffset == null) {
-          throw new ISE(
-              "got null sequence number for journal[%s] when fetching from gazette!",
-              journal
-          );
-        }
-        // reset the seek
-        recordSupplier.seek(streamPartition, nextOffset);
-        // Reset consumer offset if resetOffsetAutomatically is set to true
-        // and the current message offset in the kafka partition is more than the
-        // next message offset that we are trying to fetch
-        if (leastAvailableOffset > nextOffset) {
-          doReset = true;
-          resetPartitions.put(journal, nextOffset);
-        }
-      }
-    }
-
-    if (doReset) {
-      sendResetRequestAndWait(CollectionUtils.mapKeys(resetPartitions, streamPartition -> StreamPartition.of(
-          streamPartition, //TODO(michaelschiff): same weird as above
-          streamPartition
-      )), taskToolbox);
-    } else {
-      log.warn("Retrying in %dms", task.getPollRetryMs());
-      pollRetryLock.lockInterruptibly();
-      try {
-        long nanos = TimeUnit.MILLISECONDS.toNanos(task.getPollRetryMs());
-        while (nanos > 0L && !pauseRequested && !stopRequested.get()) {
-          nanos = isAwaitingRetry.awaitNanos(nanos);
-        }
-      }
-      finally {
-        pollRetryLock.unlock();
-      }
-    }
   }
 
   @Override

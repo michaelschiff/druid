@@ -34,7 +34,7 @@ public class GazetteSupervisorIngestionSpec extends SeekableStreamSupervisorInge
   public GazetteSupervisorIngestionSpec(
       @JsonProperty("dataSchema") DataSchema dataSchema,
       @JsonProperty("ioConfig") GazetteSupervisorIOConfig ioConfig,
-      @JsonProperty("tuningConfig") GazetteaSupervisorTuningConfig tuningConfig
+      @JsonProperty("tuningConfig") GazetteSupervisorTuningConfig tuningConfig
   )
   {
     super(dataSchema, ioConfig, tuningConfig);

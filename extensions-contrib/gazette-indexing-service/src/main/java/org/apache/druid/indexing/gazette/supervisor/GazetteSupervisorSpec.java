@@ -77,7 +77,7 @@ public class GazetteSupervisorSpec extends SeekableStreamSupervisorSpec
         taskStorage,
         taskMaster,
         indexerMetadataStorageCoordinator,
-        gaetteIndexTaskClientFactory,
+        gazetteIndexTaskClientFactory,
         mapper,
         emitter,
         monitorSchedulerConfig,

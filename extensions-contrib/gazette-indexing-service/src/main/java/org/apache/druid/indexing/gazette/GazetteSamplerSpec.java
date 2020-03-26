@@ -30,8 +30,6 @@ import org.apache.druid.indexing.overlord.sampler.SamplerConfig;
 import org.apache.druid.indexing.seekablestream.SeekableStreamSamplerSpec;
 
 import javax.annotation.Nullable;
-import java.util.HashMap;
-import java.util.Map;
 
 public class GazetteSamplerSpec extends SeekableStreamSamplerSpec
 {
@@ -57,12 +55,7 @@ public class GazetteSamplerSpec extends SeekableStreamSamplerSpec
     try {
       Thread.currentThread().setContextClassLoader(getClass().getClassLoader());
 
-      //TODO(michaelschiff): configure whatever needed here
-//      final Map<String, Object> props = new HashMap<>(((KafkaSupervisorIOConfig) ioConfig).getConsumerProperties());
-//      props.put("enable.auto.commit", "false");
-//      props.put("auto.offset.reset", "none");
-//      props.put("request.timeout.ms", Integer.toString(samplerConfig.getTimeoutMs()));
-      return new GazetteRecordSupplier(objectMapper);
+      return new GazetteRecordSupplier(((GazetteSupervisorIOConfig) ioConfig).getBrokerEndpoint());
     }
     finally {
       Thread.currentThread().setContextClassLoader(currCtxCl);

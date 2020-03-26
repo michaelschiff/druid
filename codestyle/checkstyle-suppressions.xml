@@ -69,4 +69,8 @@
 
   <suppress checks="ImportOrder" files="[\\/]target[\\/]generated-test-sources[\\/]" />
   <suppress checks="EmptyLineSeparator" files="[\\/]target[\\/]generated-test-sources[\\/]" />
+
+  <suppress checks=".*" files="GoGoProtos.java" />
+  <suppress checks=".*" files="JournalGrpc.java" />
+  <suppress checks=".*" files="Protocol.java" />
 </suppressions>

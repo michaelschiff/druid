@@ -24,11 +24,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.base.Preconditions;
 import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervisorIOConfig;
-import org.apache.druid.java.util.common.StringUtils;
 import org.joda.time.DateTime;
 import org.joda.time.Period;
-
-import java.util.Map;
 
 public class GazetteSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
 {
@@ -79,6 +76,12 @@ public class GazetteSupervisorIOConfig extends SeekableStreamSupervisorIOConfig
   public String getJournalPrefix()
   {
     return getStream();
+  }
+
+  @JsonProperty
+  public String getBrokerEndpoint()
+  {
+    return this.brokerEndpoint;
   }
 
   @JsonProperty

@@ -17,12 +17,12 @@
  * under the License.
  */
 
-package org.apache.druid.indexing.kafka;
+package org.apache.druid.indexing.gazette;
 
 import com.fasterxml.jackson.databind.Module;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.druid.indexing.kafka.supervisor.KafkaSupervisorTuningConfig;
-import org.apache.druid.indexing.kafka.test.TestModifiedKafkaIndexTaskTuningConfig;
+import org.apache.druid.indexing.gazette.supervisor.GazetteSupervisorTuningConfig;
+import org.apache.druid.indexing.gazette.test.TestModifiedGazetteIndexTaskTuningConfig;
 import org.apache.druid.jackson.DefaultObjectMapper;
 import org.apache.druid.segment.IndexSpec;
 import org.apache.druid.segment.data.CompressionStrategy;
@@ -34,22 +34,22 @@ import org.junit.Test;
 import java.io.File;
 import java.io.IOException;
 
-public class KafkaIndexTaskTuningConfigTest
+public class GazetteIndexTaskTuningConfigTest
 {
   private final ObjectMapper mapper;
 
-  public KafkaIndexTaskTuningConfigTest()
+  public GazetteIndexTaskTuningConfigTest()
   {
     mapper = new DefaultObjectMapper();
-    mapper.registerModules((Iterable<Module>) new KafkaIndexTaskModule().getJacksonModules());
+    mapper.registerModules((Iterable<Module>) new GazetteIndexTaskModule().getJacksonModules());
   }
 
   @Test
   public void testSerdeWithDefaults() throws Exception
   {
-    String jsonStr = "{\"type\": \"kafka\"}";
+    String jsonStr = "{\"type\": \"gazette\"}";
 
-    KafkaIndexTaskTuningConfig config = (KafkaIndexTaskTuningConfig) mapper.readValue(
+    GazetteIndexTaskTuningConfig config = (GazetteIndexTaskTuningConfig) mapper.readValue(
         mapper.writeValueAsString(
             mapper.readValue(
                 jsonStr,
@@ -75,7 +75,7 @@ public class KafkaIndexTaskTuningConfigTest
   public void testSerdeWithNonDefaults() throws Exception
   {
     String jsonStr = "{\n"
-                     + "  \"type\": \"kafka\",\n"
+                     + "  \"type\": \"gazette\",\n"
                      + "  \"basePersistDirectory\": \"/tmp/xxx\",\n"
                      + "  \"maxRowsInMemory\": 100,\n"
                      + "  \"maxRowsPerSegment\": 100,\n"
@@ -88,7 +88,7 @@ public class KafkaIndexTaskTuningConfigTest
                      + "  \"indexSpecForIntermediatePersists\": { \"dimensionCompression\" : \"uncompressed\" }\n"
                      + "}";
 
-    KafkaIndexTaskTuningConfig config = (KafkaIndexTaskTuningConfig) mapper.readValue(
+    GazetteIndexTaskTuningConfig config = (GazetteIndexTaskTuningConfig) mapper.readValue(
         mapper.writeValueAsString(
             mapper.readValue(
                 jsonStr,
@@ -114,7 +114,7 @@ public class KafkaIndexTaskTuningConfigTest
   @Test
   public void testConvert()
   {
-    KafkaSupervisorTuningConfig original = new KafkaSupervisorTuningConfig(
+    GazetteSupervisorTuningConfig original = new GazetteSupervisorTuningConfig(
         1,
         null,
         2,
@@ -140,7 +140,7 @@ public class KafkaIndexTaskTuningConfigTest
         null,
         null
     );
-    KafkaIndexTaskTuningConfig copy = (KafkaIndexTaskTuningConfig) original.convertToTaskTuningConfig();
+    GazetteIndexTaskTuningConfig copy = (GazetteIndexTaskTuningConfig) original.convertToTaskTuningConfig();
 
     Assert.assertEquals(1, copy.getMaxRowsInMemory());
     Assert.assertEquals(2, copy.getMaxRowsPerSegment().intValue());
@@ -157,7 +157,7 @@ public class KafkaIndexTaskTuningConfigTest
   @Test
   public void testSerdeWithModifiedTuningConfigAddedField() throws IOException
   {
-    KafkaIndexTaskTuningConfig base = new KafkaIndexTaskTuningConfig(
+    GazetteIndexTaskTuningConfig base = new GazetteIndexTaskTuningConfig(
         1,
         null,
         2,
@@ -179,8 +179,8 @@ public class KafkaIndexTaskTuningConfigTest
     );
 
     String serialized = mapper.writeValueAsString(base);
-    TestModifiedKafkaIndexTaskTuningConfig deserialized =
-        mapper.readValue(serialized, TestModifiedKafkaIndexTaskTuningConfig.class);
+    TestModifiedGazetteIndexTaskTuningConfig deserialized =
+        mapper.readValue(serialized, TestModifiedGazetteIndexTaskTuningConfig.class);
 
     Assert.assertEquals(null, deserialized.getExtra());
     Assert.assertEquals(base.getMaxRowsInMemory(), deserialized.getMaxRowsInMemory());
@@ -205,7 +205,7 @@ public class KafkaIndexTaskTuningConfigTest
   @Test
   public void testSerdeWithModifiedTuningConfigRemovedField() throws IOException
   {
-    TestModifiedKafkaIndexTaskTuningConfig base = new TestModifiedKafkaIndexTaskTuningConfig(
+    TestModifiedGazetteIndexTaskTuningConfig base = new TestModifiedGazetteIndexTaskTuningConfig(
         1,
         null,
         2,
@@ -228,8 +228,8 @@ public class KafkaIndexTaskTuningConfigTest
     );
 
     String serialized = mapper.writeValueAsString(base);
-    KafkaIndexTaskTuningConfig deserialized =
-        mapper.readValue(serialized, KafkaIndexTaskTuningConfig.class);
+    GazetteIndexTaskTuningConfig deserialized =
+        mapper.readValue(serialized, GazetteIndexTaskTuningConfig.class);
 
     Assert.assertEquals(base.getMaxRowsInMemory(), deserialized.getMaxRowsInMemory());
     Assert.assertEquals(base.getMaxBytesInMemory(), deserialized.getMaxBytesInMemory());
