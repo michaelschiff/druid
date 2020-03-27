@@ -20,16 +20,16 @@
 package org.apache.druid.indexing.gazette;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.github.michaelschiff.TestingJournalService;
+import com.github.michaelschiff.gazette.Consumer;
+import com.github.michaelschiff.gazette.TestJournalService;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.protobuf.ByteString;
 import dev.gazette.core.broker.protocol.JournalGrpc;
-import dev.gazette.core.broker.protocol.Protocol;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
 import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
-import io.grpc.stub.StreamObserver;
 import org.apache.druid.data.input.impl.DimensionsSpec;
 import org.apache.druid.data.input.impl.FloatDimensionSchema;
 import org.apache.druid.data.input.impl.JsonInputFormat;
@@ -42,7 +42,6 @@ import org.apache.druid.indexing.overlord.sampler.InputSourceSampler;
 import org.apache.druid.indexing.overlord.sampler.SamplerConfig;
 import org.apache.druid.indexing.overlord.sampler.SamplerResponse;
 import org.apache.druid.indexing.overlord.sampler.SamplerTestUtils;
-import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.granularity.Granularities;
 import org.apache.druid.java.util.common.parsers.JSONPathSpec;
 import org.apache.druid.query.aggregation.AggregatorFactory;
@@ -60,8 +59,6 @@ import org.junit.Test;
 import javax.annotation.Nullable;
 import java.util.Arrays;
 import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
 
 public class GazetteSamplerSpecTest extends InitializedNullHandlingTest
 {
@@ -90,36 +87,14 @@ public class GazetteSamplerSpecTest extends InitializedNullHandlingTest
       null
   );
 
-  private static Map<String, List<byte[]>> generateRecords(String topic)
-  {
-    return ImmutableMap.of(topic,
-            ImmutableList.of(
-       jb("2008", "a", "y", "10", "20.0", "1.0"),
-        jb("2009", "b", "y", "10", "20.0", "1.0"),
-        jb("2010", "c", "y", "10", "20.0", "1.0"),
-         jb("246140482-04-24T15:36:27.903Z", "x", "z", "10", "20.0", "1.0"),
-         StringUtils.toUtf8("unparseable"),
-       null));
-  }
-
-  private static JournalGrpc.JournalImplBase journalService = new JournalGrpc.JournalImplBase() {
-    @Override
-    public void list(Protocol.ListRequest request, StreamObserver<Protocol.ListResponse> responseObserver) {
-      Protocol.ListResponse resp = Protocol.ListResponse.newBuilder()
-              .setHeader(Protocol.Header.newBuilder()) //TODO(michaelschiff): realistic header
-              .setStatus(Protocol.Status.OK)
-              .addJournals(Protocol.ListResponse.Journal.newBuilder()
-                      .setSpec(Protocol.JournalSpec.newBuilder()
-                              .setName(JOURNAL_NAME)))
-              .build();
-      responseObserver.onNext(resp);
-      responseObserver.onCompleted();
-    }
-
-    @Override
-    public void read(Protocol.ReadRequest request, StreamObserver<Protocol.ReadResponse> responseObserver) {
-    }
-  };
+  private static TestJournalService journalService = new TestJournalService(ImmutableMap.of(JOURNAL_NAME,
+          ImmutableList.of(
+                  ByteString.copyFromUtf8(String.join("\n",
+                          jb("2008", "a", "y", "10", "20.0", "1.0"),
+                          jb("2009", "b", "y", "10", "20.0", "1.0"),
+                          jb("2010", "c", "y", "10", "20.0", "1.0"),
+                          jb("246140482-04-24T15:36:27.903Z", "x", "z", "10", "20.0", "1.0"),
+                          "unparseable")))));
   private static JournalGrpc.JournalBlockingStub stub;
 
   @BeforeClass
@@ -138,7 +113,8 @@ public class GazetteSamplerSpecTest extends InitializedNullHandlingTest
   }
 
   @AfterClass
-  public static void afterClass() {
+  public static void afterClass()
+  {
     //TODO: close journalService
   }
 
@@ -283,10 +259,10 @@ public class GazetteSamplerSpecTest extends InitializedNullHandlingTest
     Assert.assertFalse(it.hasNext());
   }
 
-  private static byte[] jb(String timestamp, String dim1, String dim2, String dimLong, String dimFloat, String met1)
+  private static String jb(String timestamp, String dim1, String dim2, String dimLong, String dimFloat, String met1)
   {
     try {
-      return new ObjectMapper().writeValueAsBytes(
+      return new ObjectMapper().writeValueAsString(
           ImmutableMap.builder()
                       .put("timestamp", timestamp)
                       .put("dim1", dim1)
@@ -302,14 +278,17 @@ public class GazetteSamplerSpecTest extends InitializedNullHandlingTest
     }
   }
 
-  private static class TestingGazetteSamplerSpec extends GazetteSamplerSpec {
-    public TestingGazetteSamplerSpec(GazetteSupervisorSpec ingestionSpec, @Nullable SamplerConfig samplerConfig, InputSourceSampler inputSourceSampler, ObjectMapper objectMapper) {
+  private static class TestingGazetteSamplerSpec extends GazetteSamplerSpec
+  {
+    public TestingGazetteSamplerSpec(GazetteSupervisorSpec ingestionSpec, @Nullable SamplerConfig samplerConfig, InputSourceSampler inputSourceSampler, ObjectMapper objectMapper)
+    {
       super(ingestionSpec, samplerConfig, inputSourceSampler, objectMapper);
     }
 
     @Override
-    protected GazetteRecordSupplier createRecordSupplier() {
-      return new GazetteRecordSupplier(stub);
+    protected GazetteRecordSupplier createRecordSupplier()
+    {
+      return new GazetteRecordSupplier(new Consumer(stub));
     }
   }
 }

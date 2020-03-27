@@ -76,8 +76,8 @@ import java.util.stream.Collectors;
  */
 public class GazetteSupervisor extends SeekableStreamSupervisor<String, Long>
 {
-  public static final TypeReference<TreeMap<Integer, Map<Integer, Long>>> CHECKPOINTS_TYPE_REF =
-      new TypeReference<TreeMap<Integer, Map<Integer, Long>>>()
+  public static final TypeReference<TreeMap<Integer, Map<String, Long>>> CHECKPOINTS_TYPE_REF =
+      new TypeReference<TreeMap<Integer, Map<String, Long>>>()
       {
       };
 
@@ -342,7 +342,7 @@ public class GazetteSupervisor extends SeekableStreamSupervisor<String, Long>
     latestSequenceFromStream = journals.stream()
                                          .collect(Collectors.toMap(
                                              StreamPartition::getPartitionId,
-                                             recordSupplier::getPosition
+                                             recordSupplier::getLatestSequenceNumber
                                          ));
   }
 

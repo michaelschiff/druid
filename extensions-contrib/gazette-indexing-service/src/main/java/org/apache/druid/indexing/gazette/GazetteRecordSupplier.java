@@ -19,11 +19,12 @@
 
 package org.apache.druid.indexing.gazette;
 
-import com.github.michaelschiff.JournalStubFactory;
+import com.github.michaelschiff.gazette.Consumer;
 import com.google.common.annotations.VisibleForTesting;
-import com.google.protobuf.ByteString;
+import com.google.common.collect.ImmutableList;
 import dev.gazette.core.broker.protocol.JournalGrpc;
-import dev.gazette.core.broker.protocol.Protocol;
+import io.grpc.ManagedChannel;
+import io.grpc.ManagedChannelBuilder;
 import org.apache.druid.indexing.seekablestream.common.OrderedPartitionableRecord;
 import org.apache.druid.indexing.seekablestream.common.RecordSupplier;
 import org.apache.druid.indexing.seekablestream.common.StreamException;
@@ -32,148 +33,113 @@ import org.apache.druid.indexing.seekablestream.common.StreamPartition;
 import javax.annotation.Nonnull;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.stream.Collectors;
 
 public class GazetteRecordSupplier implements RecordSupplier<String, Long>
 {
   private boolean closed;
-  private JournalGrpc.JournalBlockingStub stub;
-  private Map<StreamPartition<String>, Long> pollFrom = new HashMap<>();
+  private Consumer consumer;
+
+  Map<String, String> prefixes = new HashMap<>();
 
   public GazetteRecordSupplier(
       String brokerEndpoint
   )
   {
-    this(getJournalStub(brokerEndpoint));
+    this(new Consumer(getJournalStub(brokerEndpoint)));
   }
 
   @VisibleForTesting
   public GazetteRecordSupplier(
-          JournalGrpc.JournalBlockingStub stub
+      Consumer consumer
   )
   {
-    this.stub = stub;
+    this.consumer = consumer;
   }
 
   @Override
   public void assign(Set<StreamPartition<String>> streamPartitions)
   {
+    Set<String> journals = new HashSet<>();
     for (StreamPartition<String> partition : streamPartitions) {
-      pollFrom.put(partition, -1L);
+      prefixes.put(partition.getPartitionId(), partition.getStream());
+      journals.add(partition.getPartitionId());
     }
+    consumer.assign(journals);
   }
 
   @Override
   public void seek(StreamPartition<String> partition, Long sequenceNumber)
   {
-    pollFrom.put(partition, sequenceNumber);
+    consumer.seek(partition.getPartitionId(), sequenceNumber);
   }
 
   @Override
   public void seekToEarliest(Set<StreamPartition<String>> partitions)
   {
-    for (StreamPartition<String> partition : partitions) {
-      pollFrom.put(partition, 0L); //TODO(michaelschiff): this is likely incorrect
-    }
+    consumer.seekToEarliest(partitions.stream().map(p -> p.getPartitionId()).collect(Collectors.toSet()));
   }
 
   @Override
   public void seekToLatest(Set<StreamPartition<String>> partitions)
   {
-    for (StreamPartition<String> partition : partitions) {
-      pollFrom.put(partition, -1L);
-    }
+    consumer.seekToLatest(partitions.stream().map(p -> p.getPartitionId()).collect(Collectors.toSet()));
+
   }
 
   @Override
   public Set<StreamPartition<String>> getAssignment()
   {
-    return pollFrom.keySet();
+    return consumer.getAssignment()
+            .stream()
+            .map(j -> new StreamPartition<>(prefixes.get(j), j))
+            .collect(Collectors.toSet());
   }
 
   @Nonnull
   @Override
   public List<OrderedPartitionableRecord<String, Long>> poll(long timeout)
   {
-    List<OrderedPartitionableRecord<String, Long>> polledRecords = new ArrayList<>();
-    for (StreamPartition<String> partition : pollFrom.keySet()) {
-      long offset = pollFrom.get(partition);
-      Protocol.ReadRequest readRequest = Protocol.ReadRequest.newBuilder()
-              .setJournal(partition.getPartitionId())
-              .setOffset(offset)
-              .build();
-      Iterator<Protocol.ReadResponse> responseIter = stub.read(readRequest);
-      while (responseIter.hasNext()) {
-        Protocol.ReadResponse r = responseIter.next();
-        ByteString content = r.getContent();
-        if (!content.isEmpty()) {
-          offset = r.getOffset();
-          String[] recs = content.toStringUtf8().split("\n");
-          List<byte[]> recBytes = new ArrayList<>();
-          for (String rec : recs) {
-            recBytes.add(rec.getBytes(StandardCharsets.UTF_8));
-          }
-          polledRecords.add(new OrderedPartitionableRecord<>(partition.getStream(), partition.getPartitionId(), offset, recBytes));
-        }
-      }
-      pollFrom.put(partition, offset);
+    List<OrderedPartitionableRecord<String, Long>> res = new ArrayList<>();
+    for (Consumer.Record record : consumer.poll()) {
+      res.add(new OrderedPartitionableRecord<>(
+              prefixes.get(record.getJournal()),
+              record.getJournal(),
+              record.getOffset(),
+              ImmutableList.of(record.getData().getBytes(StandardCharsets.UTF_8))
+      ));
     }
-    return polledRecords;
+    return res;
   }
 
   @Override
   public Long getLatestSequenceNumber(StreamPartition<String> partition)
   {
-    Long currPos = getPosition(partition);
-    seekToLatest(Collections.singleton(partition));
-    Long nextPos = getPosition(partition);
-    seek(partition, currPos);
-    return nextPos;
+    return consumer.getWriteHead(partition.getPartitionId());
   }
 
   @Override
   public Long getEarliestSequenceNumber(StreamPartition<String> partition)
   {
-    Long currPos = getPosition(partition);
-    seekToEarliest(Collections.singleton(partition));
-    Long nextPos = getPosition(partition);
-    seek(partition, currPos);
-    return nextPos;
+    return consumer.getLowestValidOffset(partition.getPartitionId());
   }
 
   @Override
   public Long getPosition(StreamPartition<String> partition)
   {
-    return pollFrom.get(partition);
+    return consumer.getPosition(partition.getPartitionId());
   }
 
   @Override
   public Set<String> getPartitionIds(String stream)
   {
-    Protocol.ListRequest listReq = Protocol.ListRequest.newBuilder()
-            .setSelector(Protocol.LabelSelector.newBuilder()
-                    .setInclude(Protocol.LabelSet.newBuilder().addLabels(
-                            Protocol.Label.newBuilder()
-                                    .setName("prefix")
-                                    .setValue(stream)
-                                    .build())
-                            .build())
-                    .build())
-            .build();
-    Set<String> res = new HashSet<>();
-    Protocol.ListResponse list = stub.list(listReq);
-    List<Protocol.ListResponse.Journal> journalsList = list.getJournalsList();
-    for (Protocol.ListResponse.Journal journal : journalsList) {
-      res.add(journal.getSpec().getName());
-    }
-    return res;
+    return consumer.listJournalsForPrefix(stream);
   }
 
   @Override
@@ -187,7 +153,8 @@ public class GazetteRecordSupplier implements RecordSupplier<String, Long>
 
   private static JournalGrpc.JournalBlockingStub getJournalStub(String brokerEndpoint)
   {
-    return JournalStubFactory.newBlockingStub(brokerEndpoint);
+    ManagedChannel channel = ManagedChannelBuilder.forTarget(brokerEndpoint).build();
+    return JournalGrpc.newBlockingStub(channel);
   }
 
   private static <T> T wrapExceptions(Callable<T> callable)

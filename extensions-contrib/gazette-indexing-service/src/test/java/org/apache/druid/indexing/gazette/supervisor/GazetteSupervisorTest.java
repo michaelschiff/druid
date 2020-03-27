@@ -19,14 +19,21 @@
 
 package org.apache.druid.indexing.gazette.supervisor;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.michaelschiff.gazette.Consumer;
+import com.github.michaelschiff.gazette.TestJournalService;
 import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.protobuf.ByteString;
+import dev.gazette.core.broker.protocol.JournalGrpc;
+import io.grpc.ManagedChannel;
+import io.grpc.Server;
+import io.grpc.inprocess.InProcessChannelBuilder;
+import io.grpc.inprocess.InProcessServerBuilder;
 import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.data.input.impl.DimensionSchema;
 import org.apache.druid.data.input.impl.DimensionsSpec;
@@ -40,12 +47,14 @@ import org.apache.druid.indexing.common.TestUtils;
 import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
 import org.apache.druid.indexing.common.task.RealtimeIndexTask;
 import org.apache.druid.indexing.common.task.Task;
+import org.apache.druid.indexing.common.task.TaskResource;
 import org.apache.druid.indexing.gazette.GazetteDataSourceMetadata;
 import org.apache.druid.indexing.gazette.GazetteIndexTask;
 import org.apache.druid.indexing.gazette.GazetteIndexTaskClient;
 import org.apache.druid.indexing.gazette.GazetteIndexTaskClientFactory;
 import org.apache.druid.indexing.gazette.GazetteIndexTaskIOConfig;
 import org.apache.druid.indexing.gazette.GazetteIndexTaskTuningConfig;
+import org.apache.druid.indexing.gazette.GazetteRecordSupplier;
 import org.apache.druid.indexing.overlord.DataSourceMetadata;
 import org.apache.druid.indexing.overlord.IndexerMetadataStorageCoordinator;
 import org.apache.druid.indexing.overlord.TaskMaster;
@@ -77,10 +86,13 @@ import org.apache.druid.segment.indexing.DataSchema;
 import org.apache.druid.segment.indexing.RealtimeIOConfig;
 import org.apache.druid.segment.indexing.granularity.UniformGranularitySpec;
 import org.apache.druid.segment.realtime.FireDepartment;
+import org.apache.druid.segment.realtime.appenderator.AppenderatorsManager;
 import org.apache.druid.segment.realtime.appenderator.DummyForInjectionAppenderatorsManager;
+import org.apache.druid.segment.realtime.firehose.ChatHandlerProvider;
 import org.apache.druid.server.metrics.DruidMonitorSchedulerConfig;
 import org.apache.druid.server.metrics.ExceptionCapturingServiceEmitter;
 import org.apache.druid.server.metrics.NoopServiceEmitter;
+import org.apache.druid.server.security.AuthorizerMapper;
 import org.easymock.Capture;
 import org.easymock.CaptureType;
 import org.easymock.EasyMock;
@@ -98,9 +110,11 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
 import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
@@ -114,7 +128,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
       new JSONPathSpec(true, ImmutableList.of()),
       ImmutableMap.of()
   );
-  private static final String TOPIC_PREFIX = "testTopic";
+  private static final String JOURNAL_PREFIX = "testTopic/";
   private static final String DATASOURCE = "testDS";
   private static final int NUM_PARTITIONS = 3;
   private static final int TEST_CHAT_THREADS = 3;
@@ -122,7 +136,8 @@ public class GazetteSupervisorTest extends EasyMockSupport
   private static final Period TEST_HTTP_TIMEOUT = new Period("PT10S");
   private static final Period TEST_SHUTDOWN_TIMEOUT = new Period("PT80S");
 
-  private static String kafkaHost;
+  private static TestJournalService journalService;
+  private static JournalGrpc.JournalBlockingStub stub;
   private static DataSchema dataSchema;
   private static int topicPostfix;
 
@@ -143,7 +158,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
   private static String getTopic()
   {
     //noinspection StringConcatenationMissingWhitespace
-    return TOPIC_PREFIX + topicPostfix++;
+    return JOURNAL_PREFIX + topicPostfix++;
   }
 
   @Parameterized.Parameters(name = "numThreads = {0}")
@@ -158,10 +173,20 @@ public class GazetteSupervisorTest extends EasyMockSupport
   }
 
   @BeforeClass
-  public static void setupClass()
+  public static void setupClass() throws IOException
   {
-    //TODO(michaelschiff): in process journal service
     dataSchema = getDataSchema(DATASOURCE);
+    journalService = new TestJournalService();
+    String serverName = InProcessServerBuilder.generateName();
+    Server server = InProcessServerBuilder.forName(serverName)
+            .directExecutor()
+            .addService(journalService)
+            .build()
+            .start();
+    ManagedChannel channel = InProcessChannelBuilder.forName(serverName)
+            .directExecutor()
+            .build();
+    stub = JournalGrpc.newBlockingStub(channel);
   }
 
   @Before
@@ -175,6 +200,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
     taskQueue = createMock(TaskQueue.class);
 
     topic = getTopic();
+    journalService.setEvents(ImmutableMap.of());
     rowIngestionMetersFactory = new TestUtils().getRowIngestionMetersFactory();
     serviceEmitter = new ExceptionCapturingServiceEmitter();
     EmittingLogger.registerEmitter(serviceEmitter);
@@ -185,54 +211,6 @@ public class GazetteSupervisorTest extends EasyMockSupport
   public void tearDownTest()
   {
     supervisor = null;
-  }
-
-  @Test
-  public void testCreateBaseTaskContexts() throws JsonProcessingException
-  {
-    supervisor = getTestableSupervisor(1, 1, true, "PT1H", null, null);
-    final Map<String, Object> contexts = supervisor.createIndexTasks(
-        1,
-        "seq",
-        OBJECT_MAPPER,
-        new TreeMap<>(),
-        new GazetteIndexTaskIOConfig(
-            0,
-            "seq",
-            new SeekableStreamStartSequenceNumbers<>("test", Collections.emptyMap(), Collections.emptySet()),
-            new SeekableStreamEndSequenceNumbers<>("test", Collections.emptyMap()),
-            null,
-            "localhost:8080",
-            null,
-            null,
-            null,
-            INPUT_FORMAT
-        ),
-        new GazetteIndexTaskTuningConfig(
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null
-        ),
-        null
-    ).get(0).getContext();
-    final Boolean contextValue = (Boolean) contexts.get("IS_INCREMENTAL_HANDOFF_SUPPORTED");
-    Assert.assertNotNull(contextValue);
-    Assert.assertTrue(contextValue);
   }
 
   @Test
@@ -269,23 +247,23 @@ public class GazetteSupervisorTest extends EasyMockSupport
     Assert.assertFalse("minimumMessageTime", taskConfig.getMinimumMessageTime().isPresent());
     Assert.assertFalse("maximumMessageTime", taskConfig.getMaximumMessageTime().isPresent());
 
-    Assert.assertEquals(topic, taskConfig.getStartSequenceNumbers().getStream());
-    Assert.assertEquals(0L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000"));
-    Assert.assertEquals(0L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-001"));
-    Assert.assertEquals(0L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002"));
+    Assert.assertEquals(JOURNAL_PREFIX, taskConfig.getStartSequenceNumbers().getStream());
+    Assert.assertEquals(0L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/0"));
+    Assert.assertEquals(0L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/1"));
+    Assert.assertEquals(0L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/2"));
 
-    Assert.assertEquals(topic, taskConfig.getEndSequenceNumbers().getStream());
+    Assert.assertEquals(JOURNAL_PREFIX, taskConfig.getEndSequenceNumbers().getStream());
     Assert.assertEquals(
         Long.MAX_VALUE,
-        (long) taskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000")
+        (long) taskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/0")
     );
     Assert.assertEquals(
         Long.MAX_VALUE,
-        (long) taskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-001")
+        (long) taskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/1")
     );
     Assert.assertEquals(
         Long.MAX_VALUE,
-        (long) taskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002")
+        (long) taskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/2")
     );
   }
 
@@ -340,19 +318,19 @@ public class GazetteSupervisorTest extends EasyMockSupport
     Assert.assertEquals(2, task1.getIOConfig().getEndSequenceNumbers().getPartitionSequenceNumberMap().size());
     Assert.assertEquals(
         0L,
-        task1.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000").longValue()
+        task1.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/0").longValue()
     );
     Assert.assertEquals(
         Long.MAX_VALUE,
-        task1.getIOConfig().getEndSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000").longValue()
+        task1.getIOConfig().getEndSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/0").longValue()
     );
     Assert.assertEquals(
         0L,
-        task1.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002").longValue()
+        task1.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/2").longValue()
     );
     Assert.assertEquals(
         Long.MAX_VALUE,
-        task1.getIOConfig().getEndSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002").longValue()
+        task1.getIOConfig().getEndSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/2").longValue()
     );
 
     GazetteIndexTask task2 = captured.getValues().get(1);
@@ -360,11 +338,11 @@ public class GazetteSupervisorTest extends EasyMockSupport
     Assert.assertEquals(1, task2.getIOConfig().getEndSequenceNumbers().getPartitionSequenceNumberMap().size());
     Assert.assertEquals(
         0L,
-        task2.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-001").longValue()
+        task2.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/1").longValue()
     );
     Assert.assertEquals(
         Long.MAX_VALUE,
-        task2.getIOConfig().getEndSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-001").longValue()
+        task2.getIOConfig().getEndSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/1").longValue()
     );
   }
 
@@ -395,15 +373,15 @@ public class GazetteSupervisorTest extends EasyMockSupport
     Assert.assertEquals(3, task1.getIOConfig().getEndSequenceNumbers().getPartitionSequenceNumberMap().size());
     Assert.assertEquals(
         0L,
-        task1.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000").longValue()
+        task1.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/0").longValue()
     );
     Assert.assertEquals(
         0L,
-        task1.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-001").longValue()
+        task1.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/1").longValue()
     );
     Assert.assertEquals(
         0L,
-        task1.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002").longValue()
+        task1.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/2").longValue()
     );
 
     GazetteIndexTask task2 = captured.getValues().get(1);
@@ -411,15 +389,15 @@ public class GazetteSupervisorTest extends EasyMockSupport
     Assert.assertEquals(3, task2.getIOConfig().getEndSequenceNumbers().getPartitionSequenceNumberMap().size());
     Assert.assertEquals(
         0L,
-        task2.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000").longValue()
+        task2.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/0").longValue()
     );
     Assert.assertEquals(
         0L,
-        task2.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-001").longValue()
+        task2.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/1").longValue()
     );
     Assert.assertEquals(
         0L,
-        task2.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002").longValue()
+        task2.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/2").longValue()
     );
   }
 
@@ -508,7 +486,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
   public void testLatestOffset() throws Exception
   {
     supervisor = getTestableSupervisor(1, 1, false, "PT1H", null, null);
-    addSomeEvents(1100);
+    long writeHead = addSomeEvents(1100);
 
     Capture<GazetteIndexTask> captured = Capture.newInstance();
     EasyMock.expect(taskMaster.getTaskQueue()).andReturn(Optional.of(taskQueue)).anyTimes();
@@ -528,16 +506,16 @@ public class GazetteSupervisorTest extends EasyMockSupport
 
     GazetteIndexTask task = captured.getValue();
     Assert.assertEquals(
-        1101L,
-        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000").longValue()
+        writeHead,
+        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/0").longValue()
     );
     Assert.assertEquals(
-        1101L,
-        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-001").longValue()
+        writeHead,
+        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/1").longValue()
     );
     Assert.assertEquals(
-        1101L,
-        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002").longValue()
+        writeHead,
+        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/2").longValue()
     );
   }
 
@@ -574,7 +552,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
   public void testAlwaysUsesEarliestOffsetForNewlyDiscoveredPartitions() throws Exception
   {
     supervisor = getTestableSupervisor(1, 1, false, "PT1H", null, null);
-    addSomeEvents(9);
+    long writeHead = addSomeEvents(9);
 
     Capture<GazetteIndexTask> captured = Capture.newInstance();
     EasyMock.expect(taskMaster.getTaskQueue()).andReturn(Optional.of(taskQueue)).anyTimes();
@@ -593,16 +571,16 @@ public class GazetteSupervisorTest extends EasyMockSupport
 
     GazetteIndexTask task = captured.getValue();
     Assert.assertEquals(
-        10,
-        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000").longValue()
+        writeHead,
+        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/0").longValue()
     );
     Assert.assertEquals(
-        10,
-        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-001").longValue()
+        writeHead,
+        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/1").longValue()
     );
     Assert.assertEquals(
-        10,
-        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002").longValue()
+        writeHead,
+        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/2").longValue()
     );
 
     addMoreEvents(9, 6);
@@ -626,15 +604,15 @@ public class GazetteSupervisorTest extends EasyMockSupport
     task = newcaptured.getValue();
     Assert.assertEquals(
         0,
-        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-003").longValue()
+        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/3").longValue()
     );
     Assert.assertEquals(
         0,
-        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-004").longValue()
+        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/4").longValue()
     );
     Assert.assertEquals(
         0,
-        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-005").longValue()
+        task.getIOConfig().getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/5").longValue()
     );
   }
 
@@ -654,7 +632,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
     EasyMock.expect(taskStorage.getActiveTasksByDatasource(DATASOURCE)).andReturn(ImmutableList.of()).anyTimes();
     EasyMock.expect(indexerMetadataStorageCoordinator.retrieveDataSourceMetadata(DATASOURCE)).andReturn(
         new GazetteDataSourceMetadata(
-            new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L), ImmutableSet.of())
+            new SeekableStreamStartSequenceNumbers<>(JOURNAL_PREFIX, ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L), ImmutableSet.of())
         )
     ).anyTimes();
     EasyMock.expect(taskQueue.add(EasyMock.capture(captured))).andReturn(true);
@@ -669,15 +647,15 @@ public class GazetteSupervisorTest extends EasyMockSupport
     Assert.assertEquals("sequenceName-0", taskConfig.getBaseSequenceName());
     Assert.assertEquals(
         10L,
-        taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000").longValue()
+        taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/0").longValue()
     );
     Assert.assertEquals(
         20L,
-        taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-001").longValue()
+        taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/1").longValue()
     );
     Assert.assertEquals(
         30L,
-        taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002").longValue()
+        taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/2").longValue()
     );
   }
 
@@ -694,8 +672,8 @@ public class GazetteSupervisorTest extends EasyMockSupport
     EasyMock.expect(indexerMetadataStorageCoordinator.retrieveDataSourceMetadata(DATASOURCE)).andReturn(
         new GazetteDataSourceMetadata(
             new SeekableStreamStartSequenceNumbers<>(
-                topic,
-                ImmutableMap.of("topic/part-000", -10L, "topic/part-001", -20L, "topic/part-002", -30L),
+                JOURNAL_PREFIX,
+                ImmutableMap.of("testTopic/0", -10L, "testTopic/1", -20L, "testTopic/2", -30L),
                 ImmutableSet.of()
             )
         )
@@ -769,8 +747,8 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id1",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L), ImmutableSet.of()),
-        new SeekableStreamEndSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L), ImmutableSet.of()),
+        new SeekableStreamEndSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)),
         null,
         null,
         tuningConfig
@@ -779,8 +757,8 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id2",
         DATASOURCE,
         1,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-001", 0L), ImmutableSet.of()),
-        new SeekableStreamEndSequenceNumbers<>("topic", ImmutableMap.of("topic/part-001", Long.MAX_VALUE)),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/1", 0L), ImmutableSet.of()),
+        new SeekableStreamEndSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/1", Long.MAX_VALUE)),
         null,
         null,
         tuningConfig
@@ -789,10 +767,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id3",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 0L, "topic/part-001", 0L, "topic/part-002", 0L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 0L, "testTopic/1", 0L, "testTopic/2", 0L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -802,8 +780,8 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id4",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 0L, "topic/part-001", 0L), ImmutableSet.of()),
-        new SeekableStreamEndSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE)),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 0L, "testTopic/1", 0L), ImmutableSet.of()),
+        new SeekableStreamEndSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE)),
         null,
         null,
         tuningConfig
@@ -812,8 +790,8 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id5",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-001", 0L, "topic/part-002", 0L), ImmutableSet.of()),
-        new SeekableStreamEndSequenceNumbers<>("topic", ImmutableMap.of("topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/1", 0L, "testTopic/2", 0L), ImmutableSet.of()),
+        new SeekableStreamEndSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)),
         null,
         null,
         tuningConfig
@@ -851,9 +829,9 @@ public class GazetteSupervisorTest extends EasyMockSupport
     EasyMock.expect(taskClient.stopAsync("id5", false)).andReturn(Futures.immediateFuture(null));
 
     TreeMap<Integer, Map<String, Long>> checkpoints1 = new TreeMap<>();
-    checkpoints1.put(0, ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L));
+    checkpoints1.put(0, ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L));
     TreeMap<Integer, Map<String, Long>> checkpoints2 = new TreeMap<>();
-    checkpoints2.put(0, ImmutableMap.of("topic/part-001", 0L));
+    checkpoints2.put(0, ImmutableMap.of("testTopic/1", 0L));
     EasyMock.expect(taskClient.getCheckpointsAsync(EasyMock.contains("id1"), EasyMock.anyBoolean()))
             .andReturn(Futures.immediateFuture(checkpoints1))
             .times(1);
@@ -897,9 +875,9 @@ public class GazetteSupervisorTest extends EasyMockSupport
     EasyMock.expect(taskQueue.add(EasyMock.capture(captured))).andReturn(true).times(4);
 
     TreeMap<Integer, Map<String, Long>> checkpoints1 = new TreeMap<>();
-    checkpoints1.put(0, ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L));
+    checkpoints1.put(0, ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L));
     TreeMap<Integer, Map<String, Long>> checkpoints2 = new TreeMap<>();
-    checkpoints2.put(0, ImmutableMap.of("topic/part-001", 0L));
+    checkpoints2.put(0, ImmutableMap.of("testTopic/1", 0L));
     EasyMock.expect(taskClient.getCheckpointsAsync(EasyMock.contains("sequenceName-0"), EasyMock.anyBoolean()))
             .andReturn(Futures.immediateFuture(checkpoints1))
             .anyTimes();
@@ -973,8 +951,8 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id1",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L), ImmutableSet.of()),
-        new SeekableStreamEndSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L), ImmutableSet.of()),
+        new SeekableStreamEndSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)),
         now,
         maxi,
         supervisor.getTuningConfig()
@@ -999,7 +977,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
     ).anyTimes();
 
     TreeMap<Integer, Map<String, Long>> checkpoints = new TreeMap<>();
-    checkpoints.put(0, ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L));
+    checkpoints.put(0, ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L));
     EasyMock.expect(taskClient.getCheckpointsAsync(EasyMock.contains("id1"), EasyMock.anyBoolean()))
             .andReturn(Futures.immediateFuture(checkpoints))
             .times(2);
@@ -1108,9 +1086,9 @@ public class GazetteSupervisorTest extends EasyMockSupport
             .andReturn(Futures.immediateFuture(DateTimes.nowUtc()))
             .anyTimes();
     TreeMap<Integer, Map<String, Long>> checkpoints1 = new TreeMap<>();
-    checkpoints1.put(0, ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L));
+    checkpoints1.put(0, ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L));
     TreeMap<Integer, Map<String, Long>> checkpoints2 = new TreeMap<>();
-    checkpoints2.put(0, ImmutableMap.of("topic/part-001", 0L));
+    checkpoints2.put(0, ImmutableMap.of("testTopic/1", 0L));
     // there would be 4 tasks, 2 for each task group
     EasyMock.expect(taskClient.getCheckpointsAsync(EasyMock.contains("sequenceName-0"), EasyMock.anyBoolean()))
             .andReturn(Futures.immediateFuture(checkpoints1))
@@ -1218,21 +1196,21 @@ public class GazetteSupervisorTest extends EasyMockSupport
             .andReturn(Futures.immediateFuture(DateTimes.nowUtc()))
             .times(2);
     EasyMock.expect(taskClient.pauseAsync(EasyMock.contains("sequenceName-0")))
-            .andReturn(Futures.immediateFuture(ImmutableMap.of("topic/part-000", 10L, "topic/part-002", 30L)))
-            .andReturn(Futures.immediateFuture(ImmutableMap.of("topic/part-000", 10L, "topic/part-002", 35L)));
+            .andReturn(Futures.immediateFuture(ImmutableMap.of("testTopic/0", 10L, "testTopic/2", 30L)))
+            .andReturn(Futures.immediateFuture(ImmutableMap.of("testTopic/0", 10L, "testTopic/2", 35L)));
     EasyMock.expect(
         taskClient.setEndOffsetsAsync(
             EasyMock.contains("sequenceName-0"),
-            EasyMock.eq(ImmutableMap.of("topic/part-000", 10L, "topic/part-002", 35L)),
+            EasyMock.eq(ImmutableMap.of("testTopic/0", 10L, "testTopic/2", 35L)),
             EasyMock.eq(true)
         )
     ).andReturn(Futures.immediateFuture(true)).times(2);
     EasyMock.expect(taskQueue.add(EasyMock.capture(captured))).andReturn(true).times(2);
 
     TreeMap<Integer, Map<String, Long>> checkpoints1 = new TreeMap<>();
-    checkpoints1.put(0, ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L));
+    checkpoints1.put(0, ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L));
     TreeMap<Integer, Map<String, Long>> checkpoints2 = new TreeMap<>();
-    checkpoints2.put(0, ImmutableMap.of("topic/part-001", 0L));
+    checkpoints2.put(0, ImmutableMap.of("testTopic/1", 0L));
     EasyMock.expect(taskClient.getCheckpointsAsync(EasyMock.contains("sequenceName-0"), EasyMock.anyBoolean()))
             .andReturn(Futures.immediateFuture(checkpoints1))
             .times(2);
@@ -1254,9 +1232,9 @@ public class GazetteSupervisorTest extends EasyMockSupport
       Assert.assertEquals("sequenceName-0", taskConfig.getBaseSequenceName());
       Assert.assertTrue("isUseTransaction", taskConfig.isUseTransaction());
 
-      Assert.assertEquals(topic, taskConfig.getStartSequenceNumbers().getStream());
-      Assert.assertEquals(10L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000"));
-      Assert.assertEquals(35L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002"));
+      Assert.assertEquals(JOURNAL_PREFIX, taskConfig.getStartSequenceNumbers().getStream());
+      Assert.assertEquals(10L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/0"));
+      Assert.assertEquals(35L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/2"));
     }
   }
 
@@ -1273,10 +1251,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id1",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 0L, "topic/part-001", 0L, "topic/part-002", 0L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 0L, "testTopic/1", 0L, "testTopic/2", 0L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -1300,12 +1278,12 @@ public class GazetteSupervisorTest extends EasyMockSupport
     ).anyTimes();
     EasyMock.expect(taskClient.getStatusAsync("id1")).andReturn(Futures.immediateFuture(Status.PUBLISHING));
     EasyMock.expect(taskClient.getCurrentOffsetsAsync("id1", false))
-            .andReturn(Futures.immediateFuture(ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L)));
-    EasyMock.expect(taskClient.getEndOffsets("id1")).andReturn(ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L));
+            .andReturn(Futures.immediateFuture(ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L)));
+    EasyMock.expect(taskClient.getEndOffsets("id1")).andReturn(ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L));
     EasyMock.expect(taskQueue.add(EasyMock.capture(captured))).andReturn(true);
 
     TreeMap<Integer, Map<String, Long>> checkpoints = new TreeMap<>();
-    checkpoints.put(0, ImmutableMap.of("topic/part-000", 0L, "topic/part-001", 0L, "topic/part-002", 0L));
+    checkpoints.put(0, ImmutableMap.of("testTopic/0", 0L, "testTopic/1", 0L, "testTopic/2", 0L));
     EasyMock.expect(taskClient.getCheckpoints(EasyMock.anyString(), EasyMock.anyBoolean()))
             .andReturn(checkpoints)
             .anyTimes();
@@ -1327,7 +1305,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
     Assert.assertEquals(3600L, payload.getDurationSeconds());
     Assert.assertEquals(NUM_PARTITIONS, payload.getPartitions());
     Assert.assertEquals(1, payload.getReplicas());
-    Assert.assertEquals(topic, payload.getStream());
+    Assert.assertEquals(JOURNAL_PREFIX, payload.getStream());
     Assert.assertEquals(0, payload.getActiveTasks().size());
     Assert.assertEquals(1, payload.getPublishingTasks().size());
     Assert.assertEquals(SupervisorStateManager.BasicState.RUNNING, payload.getDetailedState());
@@ -1336,8 +1314,8 @@ public class GazetteSupervisorTest extends EasyMockSupport
     TaskReportData publishingReport = payload.getPublishingTasks().get(0);
 
     Assert.assertEquals("id1", publishingReport.getId());
-    Assert.assertEquals(ImmutableMap.of("topic/part-000", 0L, 1, 0L, 2, 0L), publishingReport.getStartingOffsets());
-    Assert.assertEquals(ImmutableMap.of("topic/part-000", 10L, 1, 20L, 2, 30L), publishingReport.getCurrentOffsets());
+    Assert.assertEquals(ImmutableMap.of("testTopic/0", 0L, "testTopic/1", 0L, "testTopic/2", 0L), publishingReport.getStartingOffsets());
+    Assert.assertEquals(ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L), publishingReport.getCurrentOffsets());
 
     GazetteIndexTask capturedTask = captured.getValue();
     Assert.assertEquals(dataSchema, capturedTask.getDataSchema());
@@ -1348,32 +1326,32 @@ public class GazetteSupervisorTest extends EasyMockSupport
     Assert.assertTrue("isUseTransaction", capturedTaskConfig.isUseTransaction());
 
     // check that the new task was created with starting offsets matching where the publishing task finished
-    Assert.assertEquals(topic, capturedTaskConfig.getStartSequenceNumbers().getStream());
+    Assert.assertEquals(JOURNAL_PREFIX, capturedTaskConfig.getStartSequenceNumbers().getStream());
     Assert.assertEquals(
         10L,
-        capturedTaskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000").longValue()
+        capturedTaskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/0").longValue()
     );
     Assert.assertEquals(
         20L,
-        capturedTaskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-001").longValue()
+        capturedTaskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/1").longValue()
     );
     Assert.assertEquals(
         30L,
-        capturedTaskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002").longValue()
+        capturedTaskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/2").longValue()
     );
 
-    Assert.assertEquals(topic, capturedTaskConfig.getEndSequenceNumbers().getStream());
+    Assert.assertEquals(JOURNAL_PREFIX, capturedTaskConfig.getEndSequenceNumbers().getStream());
     Assert.assertEquals(
         Long.MAX_VALUE,
-        capturedTaskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000").longValue()
+        capturedTaskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/0").longValue()
     );
     Assert.assertEquals(
         Long.MAX_VALUE,
-        capturedTaskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-001").longValue()
+        capturedTaskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/1").longValue()
     );
     Assert.assertEquals(
         Long.MAX_VALUE,
-        capturedTaskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002").longValue()
+        capturedTaskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/2").longValue()
     );
   }
 
@@ -1390,8 +1368,8 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id1",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L), ImmutableSet.of()),
-        new SeekableStreamEndSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L), ImmutableSet.of()),
+        new SeekableStreamEndSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)),
         null,
         null,
         supervisor.getTuningConfig()
@@ -1414,8 +1392,8 @@ public class GazetteSupervisorTest extends EasyMockSupport
     ).anyTimes();
     EasyMock.expect(taskClient.getStatusAsync("id1")).andReturn(Futures.immediateFuture(Status.PUBLISHING));
     EasyMock.expect(taskClient.getCurrentOffsetsAsync("id1", false))
-            .andReturn(Futures.immediateFuture(ImmutableMap.of("topic/part-000", 10L, "topic/part-002", 30L)));
-    EasyMock.expect(taskClient.getEndOffsets("id1")).andReturn(ImmutableMap.of("topic/part-000", 10L, "topic/part-002", 30L));
+            .andReturn(Futures.immediateFuture(ImmutableMap.of("testTopic/0", 10L, "testTopic/2", 30L)));
+    EasyMock.expect(taskClient.getEndOffsets("id1")).andReturn(ImmutableMap.of("testTopic/0", 10L, "testTopic/2", 30L));
     EasyMock.expect(taskQueue.add(EasyMock.capture(captured))).andReturn(true);
 
     taskRunner.registerListener(EasyMock.anyObject(TaskRunnerListener.class), EasyMock.anyObject(Executor.class));
@@ -1435,7 +1413,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
     Assert.assertEquals(3600L, payload.getDurationSeconds());
     Assert.assertEquals(NUM_PARTITIONS, payload.getPartitions());
     Assert.assertEquals(1, payload.getReplicas());
-    Assert.assertEquals(topic, payload.getStream());
+    Assert.assertEquals(JOURNAL_PREFIX, payload.getStream());
     Assert.assertEquals(0, payload.getActiveTasks().size());
     Assert.assertEquals(1, payload.getPublishingTasks().size());
     Assert.assertEquals(SupervisorStateManager.BasicState.RUNNING, payload.getDetailedState());
@@ -1444,8 +1422,8 @@ public class GazetteSupervisorTest extends EasyMockSupport
     TaskReportData publishingReport = payload.getPublishingTasks().get(0);
 
     Assert.assertEquals("id1", publishingReport.getId());
-    Assert.assertEquals(ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L), publishingReport.getStartingOffsets());
-    Assert.assertEquals(ImmutableMap.of("topic/part-000", 10L, "topic/part-002", 30L), publishingReport.getCurrentOffsets());
+    Assert.assertEquals(ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L), publishingReport.getStartingOffsets());
+    Assert.assertEquals(ImmutableMap.of("testTopic/0", 10L, "testTopic/2", 30L), publishingReport.getCurrentOffsets());
 
     GazetteIndexTask capturedTask = captured.getValue();
     Assert.assertEquals(dataSchema, capturedTask.getDataSchema());
@@ -1456,32 +1434,32 @@ public class GazetteSupervisorTest extends EasyMockSupport
     Assert.assertTrue("isUseTransaction", capturedTaskConfig.isUseTransaction());
 
     // check that the new task was created with starting offsets matching where the publishing task finished
-    Assert.assertEquals(topic, capturedTaskConfig.getStartSequenceNumbers().getStream());
+    Assert.assertEquals(JOURNAL_PREFIX, capturedTaskConfig.getStartSequenceNumbers().getStream());
     Assert.assertEquals(
         10L,
-        capturedTaskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000").longValue()
+        capturedTaskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/0").longValue()
     );
     Assert.assertEquals(
         0L,
-        capturedTaskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-001").longValue()
+        capturedTaskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/1").longValue()
     );
     Assert.assertEquals(
         30L,
-        capturedTaskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002").longValue()
+        capturedTaskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/2").longValue()
     );
 
-    Assert.assertEquals(topic, capturedTaskConfig.getEndSequenceNumbers().getStream());
+    Assert.assertEquals(JOURNAL_PREFIX, capturedTaskConfig.getEndSequenceNumbers().getStream());
     Assert.assertEquals(
         Long.MAX_VALUE,
-        capturedTaskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000").longValue()
+        capturedTaskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/0").longValue()
     );
     Assert.assertEquals(
         Long.MAX_VALUE,
-        capturedTaskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-001").longValue()
+        capturedTaskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/1").longValue()
     );
     Assert.assertEquals(
         Long.MAX_VALUE,
-        capturedTaskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002").longValue()
+        capturedTaskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/2").longValue()
     );
   }
 
@@ -1500,10 +1478,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id1",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 0L, "topic/part-001", 0L, "topic/part-002", 0L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 0L, "testTopic/1", 0L, "testTopic/2", 0L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -1514,10 +1492,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id2",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 1L, "topic/part-001", 2L, "topic/part-002", 3L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 8L, "testTopic/1", 16L, "testTopic/2", 24L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -1547,16 +1525,16 @@ public class GazetteSupervisorTest extends EasyMockSupport
     EasyMock.expect(taskClient.getStatusAsync("id2")).andReturn(Futures.immediateFuture(Status.READING));
     EasyMock.expect(taskClient.getStartTimeAsync("id2")).andReturn(Futures.immediateFuture(startTime));
     EasyMock.expect(taskClient.getCurrentOffsetsAsync("id1", false))
-            .andReturn(Futures.immediateFuture(ImmutableMap.of("topic/part-000", 1L, "topic/part-001", 2L, "topic/part-002", 3L)));
-    EasyMock.expect(taskClient.getEndOffsets("id1")).andReturn(ImmutableMap.of("topic/part-000", 1L, "topic/part-001", 2L, "topic/part-002", 3L));
+            .andReturn(Futures.immediateFuture(ImmutableMap.of("testTopic/0", 8L, "testTopic/1", 16L, "testTopic/2", 24L)));
+    EasyMock.expect(taskClient.getEndOffsets("id1")).andReturn(ImmutableMap.of("testTopic/0", 8L, "testTopic/1", 16L, "testTopic/2", 24L));
     EasyMock.expect(taskClient.getCurrentOffsetsAsync("id2", false))
-            .andReturn(Futures.immediateFuture(ImmutableMap.of("topic/part-000", 4L, "topic/part-001", 5L, "topic/part-002", 6L)));
+            .andReturn(Futures.immediateFuture(ImmutableMap.of("testTopic/0", 32L, "testTopic/1", 40L, "testTopic/2", 48L)));
 
     taskRunner.registerListener(EasyMock.anyObject(TaskRunnerListener.class), EasyMock.anyObject(Executor.class));
 
     // since id1 is publishing, so getCheckpoints wouldn't be called for it
     TreeMap<Integer, Map<String, Long>> checkpoints = new TreeMap<>();
-    checkpoints.put(0, ImmutableMap.of("topic/part-000", 1L, "topic/part-001", 2L, "topic/part-002", 3L));
+    checkpoints.put(0, ImmutableMap.of("testTopic/0", 8L, "testTopic/1", 16L, "testTopic/2", 24L));
     EasyMock.expect(taskClient.getCheckpointsAsync(EasyMock.contains("id2"), EasyMock.anyBoolean()))
             .andReturn(Futures.immediateFuture(checkpoints))
             .times(1);
@@ -1577,7 +1555,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
     Assert.assertEquals(3600L, payload.getDurationSeconds());
     Assert.assertEquals(NUM_PARTITIONS, payload.getPartitions());
     Assert.assertEquals(1, payload.getReplicas());
-    Assert.assertEquals(topic, payload.getStream());
+    Assert.assertEquals(JOURNAL_PREFIX, payload.getStream());
     Assert.assertEquals(1, payload.getActiveTasks().size());
     Assert.assertEquals(1, payload.getPublishingTasks().size());
     Assert.assertEquals(SupervisorStateManager.BasicState.RUNNING, payload.getDetailedState());
@@ -1588,18 +1566,19 @@ public class GazetteSupervisorTest extends EasyMockSupport
 
     Assert.assertEquals("id2", activeReport.getId());
     Assert.assertEquals(startTime, activeReport.getStartTime());
-    Assert.assertEquals(ImmutableMap.of("topic/part-000", 1L, 1, 2L, 2, 3L), activeReport.getStartingOffsets());
-    Assert.assertEquals(ImmutableMap.of("topic/part-000", 4L, 1, 5L, 2, 6L), activeReport.getCurrentOffsets());
-    Assert.assertEquals(ImmutableMap.of("topic/part-000", 3L, 1, 2L, 2, 1L), activeReport.getLag());
+    //Journals have 6 events in them at this point, each 7 bytes long
+    Assert.assertEquals(ImmutableMap.of("testTopic/0", 8L, "testTopic/1", 16L, "testTopic/2", 24L), activeReport.getStartingOffsets());
+    Assert.assertEquals(ImmutableMap.of("testTopic/0", 32L, "testTopic/1", 40L, "testTopic/2", 48L), activeReport.getCurrentOffsets());
+    Assert.assertEquals(ImmutableMap.of("testTopic/0", 16L, "testTopic/1", 8L, "testTopic/2", 0L), activeReport.getLag());
 
     Assert.assertEquals("id1", publishingReport.getId());
-    Assert.assertEquals(ImmutableMap.of("topic/part-000", 0L, 1, 0L, 2, 0L), publishingReport.getStartingOffsets());
-    Assert.assertEquals(ImmutableMap.of("topic/part-000", 1L, 1, 2L, 2, 3L), publishingReport.getCurrentOffsets());
+    Assert.assertEquals(ImmutableMap.of("testTopic/0", 0L, "testTopic/1", 0L, "testTopic/2", 0L), publishingReport.getStartingOffsets());
+    Assert.assertEquals(ImmutableMap.of("testTopic/0", 8L, "testTopic/1", 16L, "testTopic/2", 24L), publishingReport.getCurrentOffsets());
     Assert.assertNull(publishingReport.getLag());
 
-    Assert.assertEquals(ImmutableMap.of("topic/part-000", 7L, 1, 7L, 2, 7L), payload.getLatestOffsets());
-    Assert.assertEquals(ImmutableMap.of("topic/part-000", 3L, 1, 2L, 2, 1L), payload.getMinimumLag());
-    Assert.assertEquals(6L, (long) payload.getAggregateLag());
+    Assert.assertEquals(ImmutableMap.of("testTopic/0", 48L, "testTopic/1", 48L, "testTopic/2", 48L), payload.getLatestOffsets());
+    Assert.assertEquals(ImmutableMap.of("testTopic/0", 16L, "testTopic/1", 8L, "testTopic/2", 0L), payload.getMinimumLag());
+    Assert.assertEquals((0L + 8L + 16L), (long) payload.getAggregateLag());
     Assert.assertTrue(payload.getOffsetsLastUpdated().plusMinutes(1).isAfterNow());
   }
 
@@ -1632,9 +1611,9 @@ public class GazetteSupervisorTest extends EasyMockSupport
     EasyMock.reset(taskStorage, taskClient, taskQueue);
 
     TreeMap<Integer, Map<String, Long>> checkpoints1 = new TreeMap<>();
-    checkpoints1.put(0, ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L));
+    checkpoints1.put(0, ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L));
     TreeMap<Integer, Map<String, Long>> checkpoints2 = new TreeMap<>();
-    checkpoints2.put(0, ImmutableMap.of("topic/part-001", 0L));
+    checkpoints2.put(0, ImmutableMap.of("testTopic/1", 0L));
     EasyMock.expect(taskClient.getCheckpointsAsync(EasyMock.contains("sequenceName-0"), EasyMock.anyBoolean()))
             .andReturn(Futures.immediateFuture(checkpoints1))
             .times(2);
@@ -1695,9 +1674,9 @@ public class GazetteSupervisorTest extends EasyMockSupport
     EasyMock.reset(taskStorage, taskRunner, taskClient, taskQueue);
 
     TreeMap<Integer, Map<String, Long>> checkpoints1 = new TreeMap<>();
-    checkpoints1.put(0, ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L));
+    checkpoints1.put(0, ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L));
     TreeMap<Integer, Map<String, Long>> checkpoints2 = new TreeMap<>();
-    checkpoints2.put(0, ImmutableMap.of("topic/part-001", 0L));
+    checkpoints2.put(0, ImmutableMap.of("testTopic/1", 0L));
     EasyMock.expect(taskClient.getCheckpointsAsync(EasyMock.contains("sequenceName-0"), EasyMock.anyBoolean()))
             .andReturn(Futures.immediateFuture(checkpoints1))
             .times(2);
@@ -1741,8 +1720,8 @@ public class GazetteSupervisorTest extends EasyMockSupport
 
     for (Task task : captured.getValues()) {
       GazetteIndexTaskIOConfig taskConfig = ((GazetteIndexTask) task).getIOConfig();
-      Assert.assertEquals(0L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000"));
-      Assert.assertEquals(0L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002"));
+      Assert.assertEquals(0L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/0"));
+      Assert.assertEquals(0L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/2"));
     }
   }
 
@@ -1781,9 +1760,9 @@ public class GazetteSupervisorTest extends EasyMockSupport
     EasyMock.reset(taskStorage, taskRunner, taskClient, taskQueue);
 
     TreeMap<Integer, Map<String, Long>> checkpoints1 = new TreeMap<>();
-    checkpoints1.put(0, ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L));
+    checkpoints1.put(0, ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L));
     TreeMap<Integer, Map<String, Long>> checkpoints2 = new TreeMap<>();
-    checkpoints2.put(0, ImmutableMap.of("topic/part-001", 0L));
+    checkpoints2.put(0, ImmutableMap.of("testTopic/1", 0L));
     EasyMock.expect(taskClient.getCheckpointsAsync(EasyMock.contains("sequenceName-0"), EasyMock.anyBoolean()))
             .andReturn(Futures.immediateFuture(checkpoints1))
             .times(2);
@@ -1810,12 +1789,12 @@ public class GazetteSupervisorTest extends EasyMockSupport
             .andReturn(Futures.immediateFuture(DateTimes.nowUtc()))
             .times(2);
     EasyMock.expect(taskClient.pauseAsync(EasyMock.contains("sequenceName-0")))
-            .andReturn(Futures.immediateFuture(ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L)))
-            .andReturn(Futures.immediateFuture(ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 15L, "topic/part-002", 35L)));
+            .andReturn(Futures.immediateFuture(ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L)))
+            .andReturn(Futures.immediateFuture(ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 15L, "testTopic/2", 35L)));
     EasyMock.expect(
         taskClient.setEndOffsetsAsync(
             EasyMock.contains("sequenceName-0"),
-            EasyMock.eq(ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 35L)),
+            EasyMock.eq(ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 35L)),
             EasyMock.eq(true)
         )
     ).andReturn(Futures.immediateFailedFuture(new RuntimeException())).times(2);
@@ -1834,8 +1813,8 @@ public class GazetteSupervisorTest extends EasyMockSupport
 
     for (Task task : captured.getValues()) {
       GazetteIndexTaskIOConfig taskConfig = ((GazetteIndexTask) task).getIOConfig();
-      Assert.assertEquals(0L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000"));
-      Assert.assertEquals(0L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002"));
+      Assert.assertEquals(0L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/0"));
+      Assert.assertEquals(0L, (long) taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("testTopic/2"));
     }
   }
 
@@ -1876,10 +1855,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id1",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 0L, "topic/part-001", 0L, "topic/part-002", 0L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 0L, "testTopic/1", 0L, "testTopic/2", 0L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -1890,10 +1869,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id2",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -1904,10 +1883,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id3",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -1940,11 +1919,11 @@ public class GazetteSupervisorTest extends EasyMockSupport
     EasyMock.expect(taskClient.getStatusAsync("id3")).andReturn(Futures.immediateFuture(Status.READING));
     EasyMock.expect(taskClient.getStartTimeAsync("id2")).andReturn(Futures.immediateFuture(startTime));
     EasyMock.expect(taskClient.getStartTimeAsync("id3")).andReturn(Futures.immediateFuture(startTime));
-    EasyMock.expect(taskClient.getEndOffsets("id1")).andReturn(ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L));
+    EasyMock.expect(taskClient.getEndOffsets("id1")).andReturn(ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L));
 
     // getCheckpoints will not be called for id1 as it is in publishing state
     TreeMap<Integer, Map<String, Long>> checkpoints = new TreeMap<>();
-    checkpoints.put(0, ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L));
+    checkpoints.put(0, ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L));
     EasyMock.expect(taskClient.getCheckpointsAsync(EasyMock.contains("id2"), EasyMock.anyBoolean()))
             .andReturn(Futures.immediateFuture(checkpoints))
             .times(1);
@@ -1962,8 +1941,8 @@ public class GazetteSupervisorTest extends EasyMockSupport
     EasyMock.reset(taskRunner, taskClient, taskQueue);
     EasyMock.expect(taskRunner.getRunningTasks()).andReturn(workItems).anyTimes();
     EasyMock.expect(taskClient.pauseAsync("id2"))
-            .andReturn(Futures.immediateFuture(ImmutableMap.of("topic/part-000", 15L, "topic/part-001", 25L, "topic/part-002", 30L)));
-    EasyMock.expect(taskClient.setEndOffsetsAsync("id2", ImmutableMap.of("topic/part-000", 15L, "topic/part-001", 25L, "topic/part-002", 30L), true))
+            .andReturn(Futures.immediateFuture(ImmutableMap.of("testTopic/0", 15L, "testTopic/1", 25L, "testTopic/2", 30L)));
+    EasyMock.expect(taskClient.setEndOffsetsAsync("id2", ImmutableMap.of("testTopic/0", 15L, "testTopic/1", 25L, "testTopic/2", 30L), true))
             .andReturn(Futures.immediateFuture(true));
     taskQueue.shutdown("id3", "Killing task for graceful shutdown");
     EasyMock.expectLastCall().times(1);
@@ -2020,18 +1999,18 @@ public class GazetteSupervisorTest extends EasyMockSupport
 
     GazetteDataSourceMetadata kafkaDataSourceMetadata = new GazetteDataSourceMetadata(
         new SeekableStreamStartSequenceNumbers<>(
-            topic,
-            ImmutableMap.of("topic/part-000", 1000L, "topic/part-001", 1000L, "topic/part-002", 1000L),
+            JOURNAL_PREFIX,
+            ImmutableMap.of("testTopic/0", 1000L, "testTopic/1", 1000L, "testTopic/2", 1000L),
             ImmutableSet.of()
         )
     );
 
     GazetteDataSourceMetadata resetMetadata = new GazetteDataSourceMetadata(
-        new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of("topic/part-001", 1000L, "topic/part-002", 1000L), ImmutableSet.of())
+        new SeekableStreamStartSequenceNumbers<>(JOURNAL_PREFIX, ImmutableMap.of("testTopic/1", 1000L, "testTopic/2", 1000L), ImmutableSet.of())
     );
 
     GazetteDataSourceMetadata expectedMetadata = new GazetteDataSourceMetadata(
-        new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of("topic/part-000", 1000L), ImmutableSet.of()));
+        new SeekableStreamStartSequenceNumbers<>(JOURNAL_PREFIX, ImmutableMap.of("testTopic/0", 1000L), ImmutableSet.of()));
 
     EasyMock.reset(indexerMetadataStorageCoordinator);
     EasyMock.expect(indexerMetadataStorageCoordinator.retrieveDataSourceMetadata(DATASOURCE))
@@ -2073,8 +2052,8 @@ public class GazetteSupervisorTest extends EasyMockSupport
 
     GazetteDataSourceMetadata resetMetadata = new GazetteDataSourceMetadata(
         new SeekableStreamStartSequenceNumbers<>(
-            topic,
-            ImmutableMap.of("topic/part-001", 1000L, "topic/part-002", 1000L),
+            JOURNAL_PREFIX,
+            ImmutableMap.of("testTopic/1", 1000L, "testTopic/2", 1000L),
             ImmutableSet.of()
         )
     );
@@ -2106,7 +2085,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
     EasyMock.expect(indexerMetadataStorageCoordinator.retrieveDataSourceMetadata(DATASOURCE))
             .andReturn(
                 new GazetteDataSourceMetadata(
-                    new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of("topic/part-001", -100L, "topic/part-002", 200L))
+                    new SeekableStreamEndSequenceNumbers<>(JOURNAL_PREFIX, ImmutableMap.of("testTopic/1", -100L, "testTopic/2", 200L))
                 )
             ).times(4);
     // getOffsetFromStorageForPartition() throws an exception when the offsets are automatically reset.
@@ -2117,7 +2096,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
             DATASOURCE,
             new GazetteDataSourceMetadata(
                 // Only one partition is reset in a single supervisor run.
-                new SeekableStreamEndSequenceNumbers<>(topic, ImmutableMap.of("topic/part-002", 200L))
+                new SeekableStreamEndSequenceNumbers<>(JOURNAL_PREFIX, ImmutableMap.of("testTopic/2", 200L))
             )
         )
     ).andReturn(true);
@@ -2143,10 +2122,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id1",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 0L, "topic/part-001", 0L, "topic/part-002", 0L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 0L, "testTopic/1", 0L, "testTopic/2", 0L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -2157,10 +2136,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id2",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -2171,10 +2150,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id3",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -2207,10 +2186,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
     EasyMock.expect(taskClient.getStatusAsync("id3")).andReturn(Futures.immediateFuture(Status.READING));
     EasyMock.expect(taskClient.getStartTimeAsync("id2")).andReturn(Futures.immediateFuture(startTime));
     EasyMock.expect(taskClient.getStartTimeAsync("id3")).andReturn(Futures.immediateFuture(startTime));
-    EasyMock.expect(taskClient.getEndOffsets("id1")).andReturn(ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L));
+    EasyMock.expect(taskClient.getEndOffsets("id1")).andReturn(ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L));
 
     TreeMap<Integer, Map<String, Long>> checkpoints = new TreeMap<>();
-    checkpoints.put(0, ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L));
+    checkpoints.put(0, ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L));
     EasyMock.expect(taskClient.getCheckpointsAsync(EasyMock.contains("id2"), EasyMock.anyBoolean()))
             .andReturn(Futures.immediateFuture(checkpoints))
             .times(1);
@@ -2248,10 +2227,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id1",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 0L, "topic/part-001", 0L, "topic/part-002", 0L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 0L, "testTopic/1", 0L, "testTopic/2", 0L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -2262,10 +2241,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id2",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -2276,10 +2255,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id3",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -2310,7 +2289,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
     EasyMock.expect(taskClient.getStartTimeAsync("id3")).andReturn(Futures.immediateFuture(startTime));
 
     TreeMap<Integer, Map<String, Long>> checkpoints = new TreeMap<>();
-    checkpoints.put(0, ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L));
+    checkpoints.put(0, ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L));
     EasyMock.expect(taskClient.getCheckpointsAsync(EasyMock.contains("id1"), EasyMock.anyBoolean()))
             .andReturn(Futures.immediateFuture(checkpoints))
             .times(1);
@@ -2352,10 +2331,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id1",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of("topic/part-000", 0L, "topic/part-001", 0L, "topic/part-002", 0L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>(JOURNAL_PREFIX, ImmutableMap.of("testTopic/0", 0L, "testTopic/1", 0L, "testTopic/2", 0L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            topic,
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            JOURNAL_PREFIX,
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -2366,10 +2345,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id2",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>(JOURNAL_PREFIX, ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            topic,
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            JOURNAL_PREFIX,
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -2380,10 +2359,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id3",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>(JOURNAL_PREFIX, ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            topic,
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            JOURNAL_PREFIX,
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -2422,7 +2401,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
     EasyMock.expect(taskClient.getStartTimeAsync("id3")).andReturn(Futures.immediateFuture(startTime));
 
     final TreeMap<Integer, Map<String, Long>> checkpoints = new TreeMap<>();
-    checkpoints.put(0, ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L));
+    checkpoints.put(0, ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L));
     EasyMock.expect(taskClient.getCheckpointsAsync(EasyMock.contains("id1"), EasyMock.anyBoolean()))
             .andReturn(Futures.immediateFuture(checkpoints))
             .times(1);
@@ -2443,7 +2422,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
     supervisor.checkpoint(
         0,
         new GazetteDataSourceMetadata(
-            new SeekableStreamStartSequenceNumbers<>(topic, checkpoints.get(0), ImmutableSet.of())
+            new SeekableStreamStartSequenceNumbers<>(JOURNAL_PREFIX, checkpoints.get(0), ImmutableSet.of())
         )
     );
 
@@ -2469,10 +2448,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id1",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of("topic/part-000", 0L, "topic/part-001", 0L, "topic/part-002", 0L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>(JOURNAL_PREFIX, ImmutableMap.of("testTopic/0", 0L, "testTopic/1", 0L, "testTopic/2", 0L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            topic,
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            JOURNAL_PREFIX,
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -2483,10 +2462,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id2",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>(JOURNAL_PREFIX, ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            topic,
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            JOURNAL_PREFIX,
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -2497,10 +2476,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id3",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>(topic, ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>(JOURNAL_PREFIX, ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            topic,
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            JOURNAL_PREFIX,
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -2529,7 +2508,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
     supervisor.checkpoint(
         0,
         new GazetteDataSourceMetadata(
-            new SeekableStreamStartSequenceNumbers<>(topic, Collections.emptyMap(), ImmutableSet.of())
+            new SeekableStreamStartSequenceNumbers<>(JOURNAL_PREFIX, Collections.emptyMap(), ImmutableSet.of())
         )
     );
 
@@ -2556,7 +2535,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
   @Test
   public void testSuspendedNoRunningTasks() throws Exception
   {
-    supervisor = getTestableSupervisor(1, 1, true, "PT1H", null, null, true, kafkaHost);
+    supervisor = getTestableSupervisor(1, 1, true, "PT1H", null, null, true);
     addSomeEvents(1);
 
     EasyMock.expect(taskMaster.getTaskQueue()).andReturn(Optional.of(taskQueue)).anyTimes();
@@ -2589,7 +2568,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
     final TaskLocation location2 = new TaskLocation("testHost2", 145, -1);
     final DateTime startTime = DateTimes.nowUtc();
 
-    supervisor = getTestableSupervisor(2, 1, true, "PT1H", null, null, true, kafkaHost);
+    supervisor = getTestableSupervisor(2, 1, true, "PT1H", null, null, true);
     final GazetteSupervisorTuningConfig tuningConfig = supervisor.getTuningConfig();
     addSomeEvents(1);
 
@@ -2597,10 +2576,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id1",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 0L, "topic/part-001", 0L, "topic/part-002", 0L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 0L, "testTopic/1", 0L, "testTopic/2", 0L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -2611,10 +2590,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id2",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -2625,10 +2604,10 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id3",
         DATASOURCE,
         0,
-        new SeekableStreamStartSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L), ImmutableSet.of()),
+        new SeekableStreamStartSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L), ImmutableSet.of()),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-001", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/1", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -2664,11 +2643,11 @@ public class GazetteSupervisorTest extends EasyMockSupport
             .andReturn(Futures.immediateFuture(Status.READING));
     EasyMock.expect(taskClient.getStartTimeAsync("id2")).andReturn(Futures.immediateFuture(startTime));
     EasyMock.expect(taskClient.getStartTimeAsync("id3")).andReturn(Futures.immediateFuture(startTime));
-    EasyMock.expect(taskClient.getEndOffsets("id1")).andReturn(ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L));
+    EasyMock.expect(taskClient.getEndOffsets("id1")).andReturn(ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L));
 
     // getCheckpoints will not be called for id1 as it is in publishing state
     TreeMap<Integer, Map<String, Long>> checkpoints = new TreeMap<>();
-    checkpoints.put(0, ImmutableMap.of("topic/part-000", 10L, "topic/part-001", 20L, "topic/part-002", 30L));
+    checkpoints.put(0, ImmutableMap.of("testTopic/0", 10L, "testTopic/1", 20L, "testTopic/2", 30L));
     EasyMock.expect(taskClient.getCheckpointsAsync(EasyMock.contains("id2"), EasyMock.anyBoolean()))
             .andReturn(Futures.immediateFuture(checkpoints))
             .times(1);
@@ -2679,8 +2658,8 @@ public class GazetteSupervisorTest extends EasyMockSupport
     taskRunner.registerListener(EasyMock.anyObject(TaskRunnerListener.class), EasyMock.anyObject(Executor.class));
 
     EasyMock.expect(taskClient.pauseAsync("id2"))
-            .andReturn(Futures.immediateFuture(ImmutableMap.of("topic/part-000", 15L, "topic/part-001", 25L, "topic/part-002", 30L)));
-    EasyMock.expect(taskClient.setEndOffsetsAsync("id2", ImmutableMap.of("topic/part-000", 15L, "topic/part-001", 25L, "topic/part-002", 30L), true))
+            .andReturn(Futures.immediateFuture(ImmutableMap.of("testTopic/0", 15L, "testTopic/1", 25L, "testTopic/2", 30L)));
+    EasyMock.expect(taskClient.setEndOffsetsAsync("id2", ImmutableMap.of("testTopic/0", 15L, "testTopic/1", 25L, "testTopic/2", 30L), true))
             .andReturn(Futures.immediateFuture(true));
     taskQueue.shutdown("id3", "Killing task for graceful shutdown");
     EasyMock.expectLastCall().times(1);
@@ -2703,7 +2682,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
     taskRunner.registerListener(EasyMock.anyObject(TaskRunnerListener.class), EasyMock.anyObject(Executor.class));
     replayAll();
 
-    supervisor = getTestableSupervisor(1, 1, true, "PT1H", null, null, true, kafkaHost);
+    supervisor = getTestableSupervisor(1, 1, true, "PT1H", null, null, true);
     supervisor.start();
     supervisor.runInternal();
     verifyAll();
@@ -2716,115 +2695,16 @@ public class GazetteSupervisorTest extends EasyMockSupport
     verifyAll();
   }
 
-  @Test //TODO(michaelschiff): make sure this test still works
-  public void testFailedInitializationAndRecovery() throws Exception
-  {
-    // Block the supervisor initialization with a bad hostname config, make sure this doesn't block the lifecycle
-    supervisor = getTestableSupervisor(
-        1,
-        1,
-        true,
-        "PT1H",
-        null,
-        null,
-        false,
-        StringUtils.format("badhostname:8080")
-    );
-    final GazetteSupervisorTuningConfig tuningConfig = supervisor.getTuningConfig();
-    addSomeEvents(1);
-
-    EasyMock.expect(taskMaster.getTaskQueue()).andReturn(Optional.of(taskQueue)).anyTimes();
-    EasyMock.expect(taskMaster.getTaskRunner()).andReturn(Optional.of(taskRunner)).anyTimes();
-    EasyMock.expect(taskStorage.getActiveTasksByDatasource(DATASOURCE)).andReturn(ImmutableList.of()).anyTimes();
-    EasyMock.expect(indexerMetadataStorageCoordinator.retrieveDataSourceMetadata(DATASOURCE)).andReturn(
-        new GazetteDataSourceMetadata(
-            null
-        )
-    ).anyTimes();
-
-    replayAll();
-
-    supervisor.start();
-
-    Assert.assertTrue(supervisor.isLifecycleStarted());
-    Assert.assertFalse(supervisor.isStarted());
-
-    verifyAll();
-
-    while (supervisor.getInitRetryCounter() < 3) {
-      Thread.sleep(1000);
-    }
-
-    // Portion below is the same test as testNoInitialState(), testing the supervisor after the initialiation is fixed
-    resetAll();
-
-    Capture<GazetteIndexTask> captured = Capture.newInstance();
-    EasyMock.expect(taskMaster.getTaskQueue()).andReturn(Optional.of(taskQueue)).anyTimes();
-    EasyMock.expect(taskMaster.getTaskRunner()).andReturn(Optional.of(taskRunner)).anyTimes();
-    EasyMock.expect(taskStorage.getActiveTasksByDatasource(DATASOURCE)).andReturn(ImmutableList.of()).anyTimes();
-    EasyMock.expect(indexerMetadataStorageCoordinator.retrieveDataSourceMetadata(DATASOURCE)).andReturn(
-        new GazetteDataSourceMetadata(
-            null
-        )
-    ).anyTimes();
-    EasyMock.expect(taskQueue.add(EasyMock.capture(captured))).andReturn(true);
-    taskRunner.registerListener(EasyMock.anyObject(TaskRunnerListener.class), EasyMock.anyObject(Executor.class));
-    replayAll();
-
-    supervisor.tryInit();
-
-    Assert.assertTrue(supervisor.isLifecycleStarted());
-    Assert.assertTrue(supervisor.isStarted());
-
-    supervisor.runInternal();
-    verifyAll();
-
-    GazetteIndexTask task = captured.getValue();
-    Assert.assertEquals(dataSchema, task.getDataSchema());
-    Assert.assertEquals(tuningConfig.convertToTaskTuningConfig(), task.getTuningConfig());
-
-    GazetteIndexTaskIOConfig taskConfig = task.getIOConfig();
-    Assert.assertEquals("sequenceName-0", taskConfig.getBaseSequenceName());
-    Assert.assertTrue("isUseTransaction", taskConfig.isUseTransaction());
-    Assert.assertFalse("minimumMessageTime", taskConfig.getMinimumMessageTime().isPresent());
-    Assert.assertFalse("maximumMessageTime", taskConfig.getMaximumMessageTime().isPresent());
-
-    Assert.assertEquals(topic, taskConfig.getStartSequenceNumbers().getStream());
-    Assert.assertEquals(
-        0L,
-        taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000").longValue()
-    );
-    Assert.assertEquals(
-        0L,
-        taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-001").longValue()
-    );
-    Assert.assertEquals(
-        0L,
-        taskConfig.getStartSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002").longValue()
-    );
-
-    Assert.assertEquals(topic, taskConfig.getEndSequenceNumbers().getStream());
-    Assert.assertEquals(
-        Long.MAX_VALUE,
-        taskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-000").longValue()
-    );
-    Assert.assertEquals(
-        Long.MAX_VALUE,
-        taskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-001").longValue()
-    );
-    Assert.assertEquals(
-        Long.MAX_VALUE,
-        taskConfig.getEndSequenceNumbers().getPartitionSequenceNumberMap().get("topic/part-002").longValue()
-    );
-  }
+//@Test //TODO(michaelschiff): find another way to test that we dont block startup.
+//public void testFailedInitializationAndRecovery() throws Exception
 
   @Test
   public void testGetCurrentTotalStats()
   {
-    supervisor = getTestableSupervisor(1, 2, true, "PT1H", null, null, false, kafkaHost);
+    supervisor = getTestableSupervisor(1, 2, true, "PT1H", null, null, false);
     supervisor.addTaskGroupToActivelyReadingTaskGroup(
-        supervisor.getTaskGroupIdForPartition("topic/part-000"),
-        ImmutableMap.of("topic/part-000", 0L),
+        supervisor.getTaskGroupIdForPartition("testTopic/0"),
+        ImmutableMap.of("testTopic/0", 0L),
         Optional.absent(),
         Optional.absent(),
         ImmutableSet.of("task1"),
@@ -2832,8 +2712,8 @@ public class GazetteSupervisorTest extends EasyMockSupport
     );
 
     supervisor.addTaskGroupToPendingCompletionTaskGroup(
-        supervisor.getTaskGroupIdForPartition("topic/part-001"),
-        ImmutableMap.of("topic/part-001", 0L),
+        supervisor.getTaskGroupIdForPartition("testTopic/1"),
+        ImmutableMap.of("testTopic/1", 0L),
         Optional.absent(),
         Optional.absent(),
         ImmutableSet.of("task2"),
@@ -2886,13 +2766,13 @@ public class GazetteSupervisorTest extends EasyMockSupport
         DATASOURCE,
         0,
         new SeekableStreamStartSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L),
+            "testTopic",
+            ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L),
             ImmutableSet.of()
         ),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         null,
         null,
@@ -2923,7 +2803,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
     EasyMock.expect(taskQueue.add(EasyMock.anyObject(Task.class))).andReturn(true);
 
     TreeMap<Integer, Map<String, Long>> checkpoints1 = new TreeMap<>();
-    checkpoints1.put(0, ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L));
+    checkpoints1.put(0, ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L));
 
     EasyMock.expect(taskClient.getCheckpointsAsync(EasyMock.contains("id1"), EasyMock.anyBoolean()))
             .andReturn(Futures.immediateFuture(checkpoints1))
@@ -2959,11 +2839,11 @@ public class GazetteSupervisorTest extends EasyMockSupport
         DATASOURCE,
         0,
         new SeekableStreamStartSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L),
+            "testTopic",
+            ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L),
             ImmutableSet.of()
         ),
-        new SeekableStreamEndSequenceNumbers<>("topic", ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)),
+        new SeekableStreamEndSequenceNumbers<>("testTopic", ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)),
         null,
         null,
         supervisor.getTuningConfig()
@@ -3011,7 +2891,6 @@ public class GazetteSupervisorTest extends EasyMockSupport
         new Period("P1D"),
         new Period("P1D"),
         false,
-        kafkaHost,
         dataSchema,
         new GazetteSupervisorTuningConfig(
             1000,
@@ -3043,7 +2922,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
 
     supervisor.addTaskGroupToActivelyReadingTaskGroup(
         42,
-        ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L),
+        ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L),
         Optional.of(minMessageTime),
         Optional.of(maxMessageTime),
         ImmutableSet.of("id1", "id2", "id3", "id4"),
@@ -3083,13 +2962,13 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id1",
         0,
         new SeekableStreamStartSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L),
+            "testTopic",
+            ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L),
             ImmutableSet.of()
         ),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         minMessageTime,
         maxMessageTime,
@@ -3101,13 +2980,13 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id2",
         0,
         new SeekableStreamStartSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L),
+            "testTopic",
+            ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L),
             ImmutableSet.of()
         ),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         minMessageTime,
         maxMessageTime,
@@ -3119,13 +2998,13 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id3",
         0,
         new SeekableStreamStartSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 0L),
+            "testTopic",
+            ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 0L),
             ImmutableSet.of()
         ),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         minMessageTime,
         maxMessageTime,
@@ -3137,13 +3016,13 @@ public class GazetteSupervisorTest extends EasyMockSupport
         "id4",
         0,
         new SeekableStreamStartSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", 0L, "topic/part-002", 6L),
+            "testTopic",
+            ImmutableMap.of("testTopic/0", 0L, "testTopic/2", 6L),
             ImmutableSet.of()
         ),
         new SeekableStreamEndSequenceNumbers<>(
-            "topic",
-            ImmutableMap.of("topic/part-000", Long.MAX_VALUE, "topic/part-002", Long.MAX_VALUE)
+            "testTopic",
+            ImmutableMap.of("testTopic/0", Long.MAX_VALUE, "testTopic/2", Long.MAX_VALUE)
         ),
         minMessageTime,
         maxMessageTime,
@@ -3173,14 +3052,38 @@ public class GazetteSupervisorTest extends EasyMockSupport
     verifyAll();
   }
 
-  private void addSomeEvents(int numEventsPerPartition)
+  private long addSomeEvents(int numEventsPerPartition)
   {
-    //TODO(michaelschiff): put messages into the journal service implementation
+    Map<String, List<ByteString>> data = new HashMap<>();
+    long writeHead = 0;
+    for (int i = 0; i < NUM_PARTITIONS; i++) {
+      writeHead = 0; //reset each time, the value comes out the same no matter what
+      String journal = JOURNAL_PREFIX + i;
+      List<ByteString> fragments = new ArrayList<>();
+      for (int j = 0; j < numEventsPerPartition; j++) {
+        ByteString bytes = ByteString.copyFromUtf8("record" + i + "\n");
+        writeHead += bytes.size();
+        fragments.add(bytes);
+      }
+      data.put(journal, fragments);
+    }
+    journalService.setEvents(data);
+    return writeHead;
   }
 
   private void addMoreEvents(int numEventsPerPartition, int num_partitions)
   {
-    //TODO(michaelschiff): put more messasges into the journal service implementation
+    Map<String, List<ByteString>> data = new HashMap<>();
+    for (int i = 0; i < num_partitions; i++) {
+      String journal = JOURNAL_PREFIX + i;
+      List<ByteString> fragments = new ArrayList<>();
+      for (int j = 0; j < numEventsPerPartition; j++) {
+        ByteString bytes = ByteString.copyFromUtf8("record" + i + "\n");
+        fragments.add(bytes);
+      }
+      data.put(journal, fragments);
+    }
+    journalService.setEvents(data);
   }
 
 
@@ -3222,9 +3125,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
         duration,
         lateMessageRejectionPeriod,
         earlyMessageRejectionPeriod,
-        false,
-        kafkaHost
-    );
+        false);
   }
 
   private TestableGazetteSupervisor getTestableSupervisor(
@@ -3234,8 +3135,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
       String duration,
       Period lateMessageRejectionPeriod,
       Period earlyMessageRejectionPeriod,
-      boolean suspended,
-      String kafkaHost
+      boolean suspended
   )
   {
     return getTestableSupervisor(
@@ -3246,8 +3146,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
         duration,
         lateMessageRejectionPeriod,
         earlyMessageRejectionPeriod,
-        suspended,
-        kafkaHost
+        suspended
     );
   }
 
@@ -3259,13 +3158,12 @@ public class GazetteSupervisorTest extends EasyMockSupport
       String duration,
       Period lateMessageRejectionPeriod,
       Period earlyMessageRejectionPeriod,
-      boolean suspended,
-      String kafkaHost
+      boolean suspended
   )
   {
     GazetteSupervisorIOConfig kafkaSupervisorIOConfig = new GazetteSupervisorIOConfig(
             "localhost:8080",
-        topic,
+            JOURNAL_PREFIX,
         INPUT_FORMAT,
         replicas,
         taskCount,
@@ -3371,7 +3269,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
   {
     GazetteSupervisorIOConfig kafkaSupervisorIOConfig = new GazetteSupervisorIOConfig(
         "localhost:8080",
-        topic,
+        JOURNAL_PREFIX,
         INPUT_FORMAT,
         replicas,
         taskCount,
@@ -3474,14 +3372,13 @@ public class GazetteSupervisorTest extends EasyMockSupport
       Period lateMessageRejectionPeriod,
       Period earlyMessageRejectionPeriod,
       boolean suspended,
-      String kafkaHost,
       DataSchema dataSchema,
       GazetteSupervisorTuningConfig tuningConfig
   )
   {
     GazetteSupervisorIOConfig kafkaSupervisorIOConfig = new GazetteSupervisorIOConfig(
         "localhost:8080",
-        topic,
+        JOURNAL_PREFIX,
         INPUT_FORMAT,
         replicas,
         taskCount,
@@ -3625,7 +3522,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
       GazetteIndexTaskTuningConfig tuningConfig
   )
   {
-    return new GazetteIndexTask(
+    return new TestableGazetteIndexTask(
         id,
         null,
         schema,
@@ -3684,6 +3581,21 @@ public class GazetteSupervisorTest extends EasyMockSupport
     }
   }
 
+  private static class TestableGazetteIndexTask extends GazetteIndexTask
+  {
+
+    public TestableGazetteIndexTask(String id, TaskResource taskResource, DataSchema dataSchema, GazetteIndexTaskTuningConfig tuningConfig, GazetteIndexTaskIOConfig ioConfig, Map<String, Object> context, ChatHandlerProvider chatHandlerProvider, AuthorizerMapper authorizerMapper, RowIngestionMetersFactory rowIngestionMetersFactory, ObjectMapper configMapper, AppenderatorsManager appenderatorsManager)
+    {
+      super(id, taskResource, dataSchema, tuningConfig, ioConfig, context, chatHandlerProvider, authorizerMapper, rowIngestionMetersFactory, configMapper, appenderatorsManager);
+    }
+
+    @Override
+    protected GazetteRecordSupplier newTaskRecordSupplier()
+    {
+      return new GazetteRecordSupplier(new Consumer(stub));
+    }
+  }
+
   private static class TestableGazetteSupervisor extends GazetteSupervisor
   {
     public TestableGazetteSupervisor(
@@ -3710,8 +3622,7 @@ public class GazetteSupervisorTest extends EasyMockSupport
     @Override
     protected RecordSupplier<String, Long> setupRecordSupplier()
     {
-      //return new GazetteRecordSupplier(JournalGrpc.newBlockingStub(channel));
-      return null;
+      return new GazetteRecordSupplier(new Consumer(stub));
     }
 
     @Override
