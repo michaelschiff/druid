@@ -191,7 +191,7 @@ public class SeekableStreamIndexTaskTestBase extends EasyMockSupport
     this.lockGranularity = lockGranularity;
   }
 
-  protected static byte[] jb(
+  protected static String jb(
       String timestamp,
       String dim1,
       String dim2,
@@ -201,7 +201,7 @@ public class SeekableStreamIndexTaskTestBase extends EasyMockSupport
   )
   {
     try {
-      return new ObjectMapper().writeValueAsBytes(
+      return new ObjectMapper().writeValueAsString(
           ImmutableMap.builder()
                       .put("timestamp", timestamp)
                       .put("dim1", dim1)
@@ -217,7 +217,7 @@ public class SeekableStreamIndexTaskTestBase extends EasyMockSupport
     }
   }
 
-  protected static List<byte[]> jbl(
+  protected static List<String> jbl(
       String timestamp,
       String dim1,
       String dim2,

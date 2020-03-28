@@ -31,7 +31,6 @@ import org.apache.druid.indexing.seekablestream.common.StreamException;
 import org.apache.druid.indexing.seekablestream.common.StreamPartition;
 
 import javax.annotation.Nonnull;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -112,7 +111,7 @@ public class GazetteRecordSupplier implements RecordSupplier<String, Long>
               prefixes.get(record.getJournal()),
               record.getJournal(),
               record.getOffset(),
-              ImmutableList.of(record.getData().getBytes(StandardCharsets.UTF_8))
+              ImmutableList.of(record.getData())
       ));
     }
     return res;

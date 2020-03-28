@@ -38,7 +38,7 @@ import java.util.Map;
 
 public class GazetteIndexTask extends SeekableStreamIndexTask<String, Long>
 {
-  private static final String TYPE = "index_kafka";
+  private static final String TYPE = "index_gazette";
 
   private final GazetteIndexTaskIOConfig ioConfig;
   private final ObjectMapper configMapper;

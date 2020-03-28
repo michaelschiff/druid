@@ -86,7 +86,7 @@ public class IncrementalPublishingGazetteIndexTaskRunner extends SeekableStreamI
   @Override
   protected Long getNextStartOffset(@NotNull Long sequenceNumber)
   {
-    return sequenceNumber + 1;
+    return sequenceNumber;
   }
 
   @Nonnull
@@ -108,7 +108,7 @@ public class IncrementalPublishingGazetteIndexTaskRunner extends SeekableStreamI
     return mapper.convertValue(object, mapper.getTypeFactory().constructParametrizedType(
         SeekableStreamEndSequenceNumbers.class,
         SeekableStreamEndSequenceNumbers.class,
-        Integer.class,
+        String.class,
         Long.class
     ));
   }
