@@ -135,7 +135,6 @@ import org.junit.AfterClass;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
-import org.junit.Ignore;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
@@ -198,36 +197,63 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
   private final Set<Integer> checkpointRequestsHash = new HashSet<>();
   private RowIngestionMetersFactory rowIngestionMetersFactory;
 
+  private static long[] partition0Offsets;
+  private static long[] partition1Offsets;
+
   private static Map<String, List<ByteString>> generateRecords(String journalPrefix)
   {
 
-    ByteString frag1 = ByteString.copyFromUtf8(
-            jb("2008", "a", "y", "10", "20.0", "1.0") + "\n" +
-            jb("2009", "b", "y", "10", "20.0", "1.0") + "\n" +
-            jb("2010", "c", "y", "10", "20.0", "1.0") + "\n" +
-            jb("2011", "d", "y", "10", "20.0", "1.0") + "\n");
+    String[] partition0 = new String[] {
+        jb("2008", "a", "y", "10", "20.0", "1.0") + "\n",
+        jb("2009", "b", "y", "10", "20.0", "1.0") + "\n",
+        jb("2010", "c", "y", "10", "20.0", "1.0") + "\n",
+        jb("2011", "d", "y", "10", "20.0", "1.0") + "\n",
 
-    ByteString frag2 = ByteString.copyFromUtf8(
-            jb("2011", "e", "y", "10", "20.0", "1.0") + "\n" +
-            jb("246140482-04-24T15:36:27.903Z", "x", "z", "10", "20.0", "1.0") + "\n" +
-            "unparseable" + "\n" +
-            "unparseable2" + "\n");
+        jb("2011", "e", "y", "10", "20.0", "1.0") + "\n",
+        jb("246140482-04-24T15:36:27.903Z", "x", "z", "10", "20.0", "1.0") + "\n",
+        "unparseable" + "\n",
+        "unparseable2" + "\n",
+        "\n",
 
-    ByteString frag3 = ByteString.copyFromUtf8(
-            jb("2013", "f", "y", "10", "20.0", "1.0") + "\n" +
-            jb("2049", "f", "y", "notanumber", "20.0", "1.0") + "\n");
+        jb("2013", "f", "y", "10", "20.0", "1.0") + "\n",
+        jb("2049", "f", "y", "notanumber", "20.0", "1.0") + "\n",
 
-    ByteString frag4 = ByteString.copyFromUtf8(
-            jb("2049", "f", "y", "10", "notanumber", "1.0") + "\n" +
-            jb("2049", "f", "y", "10", "20.0", "notanumber") + "\n");
+        jb("2049", "f", "y", "10", "notanumber", "1.0") + "\n",
+        jb("2049", "f", "y", "10", "20.0", "notanumber") + "\n",
+        jb("2049", "f", "y", "10", "20.0", "2.0") + "\n",
+    };
 
+    partition0Offsets = new long[partition0.length];
+    long soFar = 0;
+    for (int i = 0; i < partition0Offsets.length; i++) {
+      partition0Offsets[i] = soFar;
+      if (i < partition0.length) {
+        soFar += partition0[i].length();
+      }
+    }
 
+    String[] partition1 = new String[]{
+        jb("2012", "g", "y", "10", "20.0", "1.0") + "\n",
+        jb("2011", "h", "y", "10", "20.0", "1.0") + "\n",
+        jb("2010", "h", "y", "10", "20.0", "1.0") + "\n"
+    };
+    soFar = 0;
+    partition1Offsets = new long[partition1.length];
+    for (int i = 0; i < partition1Offsets.length; i++) {
+      partition1Offsets[i] = soFar;
+      if (i < partition1.length) {
+        soFar += partition1[i].length();
+      }
+    }
+
+    ByteString frag1 = ByteString.copyFromUtf8(String.join("", partition0[0], partition0[1], partition0[2], partition0[3]));
+    ByteString frag2 = ByteString.copyFromUtf8(String.join("", partition0[4], partition0[5], partition0[6], partition0[7]));
+    ByteString frag3 = ByteString.copyFromUtf8(String.join("", partition0[8], partition0[9]));
+    ByteString frag4 = ByteString.copyFromUtf8(String.join("", partition0[10], partition0[11], partition0[12]));
 
     return ImmutableMap.of(
             journalPrefix + "0", ImmutableList.of(frag1, frag2, frag3, frag4),
-            journalPrefix + "1", ImmutableList.of(ByteString.copyFromUtf8(
-                    jb("2012", "g", "y", "10", "20.0", "1.0") + "\n" +
-                    jb("2011", "h", "y", "10", "20.0", "1.0") + "\n")));
+            journalPrefix + "1", ImmutableList.of(ByteString.copyFromUtf8(String.join("", partition1[0], partition1[1]))));
   }
 
   private static Map<String, List<ByteString>> generateSinglePartitionRecords(String journalPrefix)
@@ -348,8 +374,8 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 5L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[5])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -377,8 +403,10 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
+    //Expect message 4 since org.apache.druid.indexing.gazette.IncrementalPublishingGazetteIndexTaskRunner.getNextStartOffset
+    //returns the current sequence number (not +1 like kafka).  This is the same as the behavior for kinesis.
     Assert.assertEquals(
-        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 5L))),
+        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[4]))),
         newDataSchemaMetadata()
     );
   }
@@ -395,8 +423,8 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 5L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[5])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -424,8 +452,10 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         ),
         publishedDescriptors()
     );
+    //Expect message 4 since org.apache.druid.indexing.gazette.IncrementalPublishingGazetteIndexTaskRunner.getNextStartOffset
+    //returns the current sequence number (not +1 like kafka).  This is the same as the behavior for kinesis.
     Assert.assertEquals(
-        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 5L))),
+        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[4]))),
         newDataSchemaMetadata()
     );
   }
@@ -433,13 +463,14 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
   @Test(timeout = 60_000L)
   public void testRunBeforeDataInserted() throws Exception
   {
+    Map<String, List<ByteString>> data = generateRecords(journalPrefix);
     final GazetteIndexTask task = createTask(
         null,
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 5L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[5])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "locahost:8080",
             true,
@@ -457,7 +488,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     }
 
     // Insert data
-    journalService.setEvents(generateRecords(journalPrefix));
+    journalService.setEvents(data);
 
     // Wait for task to exit
     Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
@@ -476,7 +507,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         publishedDescriptors()
     );
     Assert.assertEquals(
-        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 5L))),
+        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[4]))),
         newDataSchemaMetadata()
     );
   }
@@ -491,8 +522,8 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 12L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[13])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -505,6 +536,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     SeekableStreamIndexTaskRunner runner = task.getRunner();
     while (true) {
       Thread.sleep(1000);
+      System.out.println(runner.getStatus());
       if (runner.getStatus() == Status.PUBLISHING) {
         break;
       }
@@ -533,7 +565,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
   }
 
-  @Test(timeout = 60_000L)
+  @Test//(timeout = 60_000L)
   public void testIncrementalHandOff() throws Exception
   {
     final String baseSequenceName = "sequence0";
@@ -552,15 +584,15 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     // of events fetched across two partitions from Gazette
     final SeekableStreamEndSequenceNumbers<String, Long> checkpoint1 = new SeekableStreamEndSequenceNumbers<>(
         journalPrefix,
-        ImmutableMap.of(journalPrefix + "0", 5L, journalPrefix + "1", 0L)
+        ImmutableMap.of(journalPrefix + "0", partition0Offsets[4], journalPrefix + "1", 0L)
     );
     final SeekableStreamEndSequenceNumbers<String, Long> checkpoint2 = new SeekableStreamEndSequenceNumbers<>(
         journalPrefix,
-        ImmutableMap.of(journalPrefix + "0", 4L, journalPrefix + "1", 2L)
+        ImmutableMap.of(journalPrefix + "0", partition0Offsets[3], journalPrefix + "1", partition1Offsets[1])
     );
     final SeekableStreamEndSequenceNumbers<String, Long> endPartitions = new SeekableStreamEndSequenceNumbers<>(
         journalPrefix,
-        ImmutableMap.of(journalPrefix + "0", 10L, journalPrefix + "1", 2L)
+        ImmutableMap.of(journalPrefix + "0", partition0Offsets[10], journalPrefix + "1", partition1Offsets[2])
     );
     final GazetteIndexTask task = createTask(
         null,
@@ -602,7 +634,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     // Check metrics
     Assert.assertEquals(8, task.getRunner().getRowIngestionMeters().getProcessed());
     Assert.assertEquals(3, task.getRunner().getRowIngestionMeters().getUnparseable());
-    Assert.assertEquals(1, task.getRunner().getRowIngestionMeters().getThrownAway());
+    Assert.assertEquals(0, task.getRunner().getRowIngestionMeters().getThrownAway());
 
     // Check published metadata and segments in deep storage
     assertEqualsExceptVersion(
@@ -619,7 +651,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     );
     Assert.assertEquals(
         new GazetteDataSourceMetadata(
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 10L, journalPrefix + "1", 2L))
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[9], journalPrefix + "1", partition0Offsets[1]))
         ),
         newDataSchemaMetadata()
     );
@@ -635,7 +667,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
 
     // Insert data
     Map<String, List<ByteString>> data = generateRecords(journalPrefix);
-    Map<String, List<ByteString>> dataPart0 = ImmutableMap.of(journalPrefix + "0", data.get(journalPrefix + "0"));
+    Map<String, List<ByteString>> dataPart0 = ImmutableMap.of(journalPrefix + "0", data.get(journalPrefix + "0"), journalPrefix + "1", ImmutableList.of());
     Map<String, List<ByteString>> dataPart1 = ImmutableMap.of(journalPrefix + "1", data.get(journalPrefix + "1"));
     journalService.setEvents(dataPart0);
 
@@ -646,16 +678,16 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     );
     final SeekableStreamEndSequenceNumbers<String, Long> checkpoint1 = new SeekableStreamEndSequenceNumbers<>(
         journalPrefix,
-        ImmutableMap.of(journalPrefix + "0", 3L, journalPrefix + "1", 0L)
+        ImmutableMap.of(journalPrefix + "0", partition0Offsets[3], journalPrefix + "1", partition1Offsets[0])
     );
     final SeekableStreamEndSequenceNumbers<String, Long> checkpoint2 = new SeekableStreamEndSequenceNumbers<>(
         journalPrefix,
-        ImmutableMap.of(journalPrefix + "0", 10L, journalPrefix + "1", 0L)
+        ImmutableMap.of(journalPrefix + "0", partition0Offsets[10], journalPrefix + "1", partition1Offsets[0])
     );
 
     final SeekableStreamEndSequenceNumbers<String, Long> endPartitions = new SeekableStreamEndSequenceNumbers<>(
         journalPrefix,
-        ImmutableMap.of(journalPrefix + "0", 10L, journalPrefix + "1", 2L)
+        ImmutableMap.of(journalPrefix + "0", partition0Offsets[10], journalPrefix + "1", partition1Offsets[2])
     );
     final GazetteIndexTask task = createTask(
         null,
@@ -737,14 +769,14 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     );
     Assert.assertEquals(
         new GazetteDataSourceMetadata(
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 10L, journalPrefix + "1", 2L))
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[9], journalPrefix + "1", partition1Offsets[1]))
         ),
         newDataSchemaMetadata()
     );
 
     Assert.assertEquals(
         new GazetteDataSourceMetadata(
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 10L, journalPrefix + "1", 2L))
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[9], journalPrefix + "1", partition1Offsets[1]))
         ),
         newDataSchemaMetadata()
     );
@@ -763,17 +795,17 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
 
     final SeekableStreamStartSequenceNumbers<String, Long> startPartitions = new SeekableStreamStartSequenceNumbers<>(
         journalPrefix,
-        ImmutableMap.of(journalPrefix + "0", 0L, journalPrefix + "1", 0L),
+        ImmutableMap.of(journalPrefix + "0", partition0Offsets[0], journalPrefix + "1", partition1Offsets[0]),
         ImmutableSet.of()
     );
     // Checkpointing will happen at checkpoint
     final SeekableStreamEndSequenceNumbers<String, Long> checkpoint = new SeekableStreamEndSequenceNumbers<>(
         journalPrefix,
-        ImmutableMap.of(journalPrefix + "0", 1L, journalPrefix + "1", 0L)
+        ImmutableMap.of(journalPrefix + "0", partition0Offsets[1], journalPrefix + "1", partition1Offsets[0])
     );
     final SeekableStreamEndSequenceNumbers<String, Long> endPartitions = new SeekableStreamEndSequenceNumbers<>(
         journalPrefix,
-        ImmutableMap.of(journalPrefix + "0", 2L, journalPrefix + "1", 0L)
+        ImmutableMap.of(journalPrefix + "0", partition0Offsets[2], journalPrefix + "1", partition1Offsets[0])
     );
     final GazetteIndexTask task = createTask(
         null,
@@ -796,6 +828,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     while (task.getRunner().getStatus() != Status.PAUSED) {
       Thread.sleep(10);
     }
+    System.out.println(task.getRunner().getStatus());
     final Map<String, Long> currentOffsets = ImmutableMap.copyOf(task.getRunner().getCurrentOffsets());
     Assert.assertEquals(checkpoint.getPartitionSequenceNumberMap(), currentOffsets);
     task.getRunner().setEndOffsets(currentOffsets, false);
@@ -827,7 +860,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     );
     Assert.assertEquals(
         new GazetteDataSourceMetadata(
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 2L, journalPrefix + "1", 0L))
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[1], journalPrefix + "1", partition0Offsets[0]))
         ),
         newDataSchemaMetadata()
     );
@@ -940,13 +973,14 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
   @Test(timeout = 60_000L)
   public void testRunWithMinimumMessageTime() throws Exception
   {
+    Map<String, List<ByteString>> data = generateRecords(journalPrefix);
     final GazetteIndexTask task = createTask(
         null,
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
             new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 5L)),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[5])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -964,7 +998,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     }
 
     // Insert data
-    journalService.setEvents(generateRecords(journalPrefix));
+    journalService.setEvents(data);
 
     // Wait for task to exit
     Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
@@ -983,7 +1017,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         publishedDescriptors()
     );
     Assert.assertEquals(
-        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 5L))),
+        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[4]))),
         newDataSchemaMetadata()
     );
   }
@@ -991,13 +1025,14 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
   @Test(timeout = 60_000L)
   public void testRunWithMaximumMessageTime() throws Exception
   {
+    Map<String, List<ByteString>> data = generateRecords(journalPrefix);
     final GazetteIndexTask task = createTask(
         null,
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
             new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 5L)),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[5])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -1015,7 +1050,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     }
 
     // Insert data
-    journalService.setEvents(generateRecords(journalPrefix));
+    journalService.setEvents(data);
 
     // Wait for task to exit
     Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
@@ -1035,7 +1070,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         publishedDescriptors()
     );
     Assert.assertEquals(
-        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 5L))),
+        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[4]))),
         newDataSchemaMetadata()
     );
   }
@@ -1043,6 +1078,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
   @Test(timeout = 60_000L)
   public void testRunWithTransformSpec() throws Exception
   {
+    Map<String, List<ByteString>> data = generateRecords(journalPrefix);
     final GazetteIndexTask task = createTask(
         null,
         NEW_DATA_SCHEMA.withTransformSpec(
@@ -1057,7 +1093,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
             0,
             "sequence0",
             new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 5L)),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[5])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -1075,7 +1111,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     }
 
     // Insert data
-    journalService.setEvents(generateRecords(journalPrefix));
+    journalService.setEvents(data);
 
     // Wait for task to exit
     Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
@@ -1089,7 +1125,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     final List<SegmentDescriptor> publishedDescriptors = publishedDescriptors();
     assertEqualsExceptVersion(ImmutableList.of(sdd("2009/P1D", 0)), publishedDescriptors);
     Assert.assertEquals(
-        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 5L))),
+        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[4]))),
         newDataSchemaMetadata()
     );
 
@@ -1109,8 +1145,8 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 2L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -1147,8 +1183,8 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 5L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[5])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -1177,7 +1213,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         publishedDescriptors()
     );
     Assert.assertEquals(
-        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 5L))),
+        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[4]))),
         newDataSchemaMetadata()
     );
   }
@@ -1196,8 +1232,8 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 5L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[5])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -1227,7 +1263,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     );
     Assert.assertEquals(
         new GazetteDataSourceMetadata(
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 5L))
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[4]))
         ),
         newDataSchemaMetadata()
     );
@@ -1267,7 +1303,9 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     Assert.assertEquals(TaskState.FAILED, future.get().getStatusCode());
 
     // Check metrics
-    Assert.assertEquals(3, task.getRunner().getRowIngestionMeters().getProcessed());
+    // The first 5 messages parse fine
+    Assert.assertEquals(5, task.getRunner().getRowIngestionMeters().getProcessed());
+    // The 6th fails and we stop there because reportParseExceptions = true
     Assert.assertEquals(1, task.getRunner().getRowIngestionMeters().getUnparseable());
     Assert.assertEquals(0, task.getRunner().getRowIngestionMeters().getThrownAway());
 
@@ -1291,8 +1329,8 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 13L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[13])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -1314,7 +1352,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     Assert.assertEquals(4, task.getRunner().getRowIngestionMeters().getProcessed());
     Assert.assertEquals(3, task.getRunner().getRowIngestionMeters().getProcessedWithError());
     Assert.assertEquals(3, task.getRunner().getRowIngestionMeters().getUnparseable());
-    Assert.assertEquals(1, task.getRunner().getRowIngestionMeters().getThrownAway());
+    Assert.assertEquals(0, task.getRunner().getRowIngestionMeters().getThrownAway());
 
     // Check published metadata
     assertEqualsExceptVersion(
@@ -1322,7 +1360,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         publishedDescriptors()
     );
     Assert.assertEquals(
-        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 13L))),
+        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[12]))),
         newDataSchemaMetadata()
     );
 
@@ -1334,7 +1372,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
             RowIngestionMeters.PROCESSED, 4,
             RowIngestionMeters.PROCESSED_WITH_ERROR, 3,
             RowIngestionMeters.UNPARSEABLE, 3,
-            RowIngestionMeters.THROWN_AWAY, 1
+            RowIngestionMeters.THROWN_AWAY, 0
         )
     );
     Assert.assertEquals(expectedMetrics, reportData.getRowStats());
@@ -1369,8 +1407,8 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 10L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[10])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -1425,13 +1463,14 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
   @Test(timeout = 60_000L)
   public void testRunReplicas() throws Exception
   {
+    Map<String, List<ByteString>> data = generateRecords(journalPrefix);
     final GazetteIndexTask task1 = createTask(
         null,
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 5L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[5])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -1445,8 +1484,8 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 5L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[5])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -1460,7 +1499,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     final ListenableFuture<TaskStatus> future2 = runTask(task2);
 
     // Insert data
-    journalService.setEvents(generateRecords(journalPrefix));
+    journalService.setEvents(data);
 
     // Wait for tasks to exit
     Assert.assertEquals(TaskState.SUCCESS, future1.get().getStatusCode());
@@ -1483,7 +1522,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         publishedDescriptors()
     );
     Assert.assertEquals(
-        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 5L))),
+        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[4]))),
         newDataSchemaMetadata()
     );
   }
@@ -1491,13 +1530,14 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
   @Test(timeout = 60_000L)
   public void testRunConflicting() throws Exception
   {
+    Map<String, List<ByteString>> data = generateRecords(journalPrefix);
     final GazetteIndexTask task1 = createTask(
         null,
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 5L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[5])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -1511,8 +1551,8 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new GazetteIndexTaskIOConfig(
             1,
             "sequence1",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 3L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 10L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[3]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[10])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "locahost:8080",
             true,
@@ -1523,7 +1563,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     );
 
     // Insert data
-    journalService.setEvents(generateRecords(journalPrefix));
+    journalService.setEvents(data);
 
     // Run first task
     final ListenableFuture<TaskStatus> future1 = runTask(task1);
@@ -1539,7 +1579,9 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     Assert.assertEquals(0, task1.getRunner().getRowIngestionMeters().getThrownAway());
     Assert.assertEquals(3, task2.getRunner().getRowIngestionMeters().getProcessed());
     Assert.assertEquals(3, task2.getRunner().getRowIngestionMeters().getUnparseable());
-    Assert.assertEquals(1, task2.getRunner().getRowIngestionMeters().getThrownAway());
+
+    //TODO(michaelschiff): confirm thrown away expectation in kafka test is just for null record which we dont have
+    Assert.assertEquals(0, task2.getRunner().getRowIngestionMeters().getThrownAway());
 
     // Check published segments & metadata, should all be from the first task
     final List<SegmentDescriptor> publishedDescriptors = publishedDescriptors();
@@ -1551,7 +1593,10 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         publishedDescriptors
     );
     Assert.assertEquals(
-        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 5L))),
+            //The last record consumed by the task that got  to complete was number 4,
+            // and since org.apache.druid.indexing.gazette.IncrementalPublishingGazetteIndexTaskRunner.getNextStartOffset
+            // returns the current sequence number (same as kinesis (since +1 is not possible))
+        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[4]))),
         newDataSchemaMetadata()
     );
   }
@@ -1559,13 +1604,15 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
   @Test(timeout = 60_000L)
   public void testRunConflictingWithoutTransactions() throws Exception
   {
+
+    Map<String, List<ByteString>> data = generateRecords(journalPrefix);
     final GazetteIndexTask task1 = createTask(
         null,
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 5L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[5])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             false,
@@ -1579,8 +1626,8 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new GazetteIndexTaskIOConfig(
             1,
             "sequence1",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 3L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 10L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[3]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[10])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             false,
@@ -1591,7 +1638,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     );
 
     // Insert data
-    journalService.setEvents(generateRecords(journalPrefix));
+    journalService.setEvents(data);
 
     // Run first task
     final ListenableFuture<TaskStatus> future1 = runTask(task1);
@@ -1613,7 +1660,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     Assert.assertEquals(0, task1.getRunner().getRowIngestionMeters().getThrownAway());
     Assert.assertEquals(3, task2.getRunner().getRowIngestionMeters().getProcessed());
     Assert.assertEquals(3, task2.getRunner().getRowIngestionMeters().getUnparseable());
-    Assert.assertEquals(1, task2.getRunner().getRowIngestionMeters().getThrownAway());
+    Assert.assertEquals(0, task2.getRunner().getRowIngestionMeters().getThrownAway());
 
     // Check published segments & metadata
     SegmentDescriptorAndExpectedDim1Values desc3 = sdd("2011/P1D", 1, ImmutableList.of("d", "e"));
@@ -1625,13 +1672,14 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
   @Test(timeout = 60_000L)
   public void testRunOneTaskTwoPartitions() throws Exception
   {
+    Map<String, List<ByteString>> data = generateRecords(journalPrefix);
     final GazetteIndexTask task = createTask(
         null,
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 2L, "1", 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 5L, "1", 2L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2], journalPrefix + "1", 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[5], journalPrefix + "1", partition0Offsets[2])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -1644,7 +1692,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     final ListenableFuture<TaskStatus> future = runTask(task);
 
     // Insert data
-    journalService.setEvents(generateRecords(journalPrefix));
+    journalService.setEvents(data);
 
     // Wait for tasks to exit
     Assert.assertEquals(TaskState.SUCCESS, future.get().getStatusCode());
@@ -1664,7 +1712,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     assertEqualsExceptVersion(ImmutableList.of(desc1, desc2, desc4), publishedDescriptors());
     Assert.assertEquals(
         new GazetteDataSourceMetadata(
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 5L, "1", 2L))
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[4], journalPrefix + "1", partition0Offsets[1]))
         ),
         newDataSchemaMetadata()
     );
@@ -1673,13 +1721,14 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
   @Test(timeout = 60_000L)
   public void testRunTwoTasksTwoPartitions() throws Exception
   {
+    Map<String, List<ByteString>> data = generateRecords(journalPrefix);
     final GazetteIndexTask task1 = createTask(
         null,
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 5L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[5])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -1693,8 +1742,8 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new GazetteIndexTaskIOConfig(
             1,
             "sequence1",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("1", 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("1", 1L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "1", 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "1", partition0Offsets[1])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -1708,7 +1757,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     final ListenableFuture<TaskStatus> future2 = runTask(task2);
 
     // Insert data
-    journalService.setEvents(generateRecords(journalPrefix));
+    journalService.setEvents(data);
 
     // Wait for tasks to exit
     Assert.assertEquals(TaskState.SUCCESS, future1.get().getStatusCode());
@@ -1733,7 +1782,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     );
     Assert.assertEquals(
         new GazetteDataSourceMetadata(
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 5L, "1", 1L))
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[4], journalPrefix + "1", 0L))
         ),
         newDataSchemaMetadata()
     );
@@ -1742,13 +1791,16 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
   @Test(timeout = 60_000L)
   public void testRestore() throws Exception
   {
+    Map<String, List<ByteString>> data = generateRecords(journalPrefix);
+    List<ByteString> journal0Fragments = data.get(journalPrefix + "0");
+
     final GazetteIndexTask task1 = createTask(
         null,
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 6L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[6])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -1761,15 +1813,12 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     final ListenableFuture<TaskStatus> future1 = runTask(task1);
 
     // Insert some data, but not enough for the task to finish
-    ByteString frag1 = ByteString.copyFromUtf8(String.join("\n",
-            jb("2008", "a", "y", "10", "20.0", "1.0"),
-            jb("2009", "b", "y", "10", "20.0", "1.0"),
-            jb("2010", "c", "y", "10", "20.0", "1.0")));
+    ByteString frag1 = journal0Fragments.get(0);
+    ByteString frag2 = journal0Fragments.get(1);
+    ByteString frag3 = journal0Fragments.get(2);
 
-    ByteString frag2 = ByteString.copyFromUtf8(String.join("\n",
-            new String[]{jb("2011", "d", "y", "10", "20.0", "1.0")}));
     Map<String, List<ByteString>> firstBatch = ImmutableMap.of(journalPrefix + "0",
-            ImmutableList.of(frag1, frag2));
+            ImmutableList.of(frag1, frag2, frag3));
     journalService.setEvents(firstBatch);
 
     while (countEvents(task1) != 2) {
@@ -1790,8 +1839,8 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 6L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[6])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -1804,27 +1853,13 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     final ListenableFuture<TaskStatus> future2 = runTask(task2);
 
     // Insert remaining data
-    ByteString frag3 = ByteString.copyFromUtf8(String.join("\n",
-            jb("2011", "e", "y", "10", "20.0", "1.0"),
-            jb("246140482-04-24T15:36:27.903Z", "x", "z", "10", "20.0", "1.0"),
-            "unparseable",
-            "unparseable2"));
+    ByteString frag4 = journal0Fragments.get(3);
 
-    ByteString frag4 = ByteString.copyFromUtf8(String.join("\n",
-            jb("2013", "f", "y", "10", "20.0", "1.0"),
-            jb("2049", "f", "y", "notanumber", "20.0", "1.0")));
-
-    ByteString frag5 = ByteString.copyFromUtf8(String.join("\n",
-            jb("2049", "f", "y", "10", "notanumber", "1.0"),
-            jb("2049", "f", "y", "10", "20.0", "notanumber")));
-
-
+    List<ByteString> journal1Fragments = data.get(journalPrefix + "1");
 
     Map<String, List<ByteString>> rest = ImmutableMap.of(
-            journalPrefix + "0", ImmutableList.of(frag3, frag4, frag5),
-            journalPrefix + "1", ImmutableList.of(ByteString.copyFromUtf8(String.join("\n",
-                    jb("2012", "g", "y", "10", "20.0", "1.0"),
-                    jb("2011", "h", "y", "10", "20.0", "1.0")))));
+            journalPrefix + "0", ImmutableList.of(frag4),
+            journalPrefix + "1", journal1Fragments);
     journalService.addEvents(rest);
 
     // Wait for task to exit
@@ -1848,7 +1883,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         publishedDescriptors()
     );
     Assert.assertEquals(
-        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 6L))),
+        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[5]))),
         newDataSchemaMetadata()
     );
   }
@@ -1865,8 +1900,8 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 10L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[10])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -1878,7 +1913,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
 
     final SeekableStreamStartSequenceNumbers<String, Long> checkpoint = new SeekableStreamStartSequenceNumbers<>(
         journalPrefix,
-        ImmutableMap.of("0", 5L),
+        ImmutableMap.of(journalPrefix + "0", partition0Offsets[4]),
         ImmutableSet.of("0")
     );
 
@@ -1957,13 +1992,14 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
   @Test(timeout = 60_000L)
   public void testRunWithPauseAndResume() throws Exception
   {
+    Map<String, List<ByteString>> data = generateRecords(journalPrefix);
     final GazetteIndexTask task = createTask(
         null,
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 6L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", partition0Offsets[2]), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", partition0Offsets[6])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -1976,15 +2012,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     final ListenableFuture<TaskStatus> future = runTask(task);
 
     // Insert some data, but not enough for the task to finish
-    ByteString frag1 = ByteString.copyFromUtf8(String.join("\n",
-            jb("2008", "a", "y", "10", "20.0", "1.0"),
-            jb("2009", "b", "y", "10", "20.0", "1.0"),
-            jb("2010", "c", "y", "10", "20.0", "1.0")));
-
-    ByteString frag2 = ByteString.copyFromUtf8(String.join("\n",
-            jb("2011", "d", "y", "10", "20.0", "1.0")));
-    Map<String, List<ByteString>> firstBatch = ImmutableMap.of(journalPrefix + "0",
-            ImmutableList.of(frag1, frag2));
+    Map<String, List<ByteString>> firstBatch = ImmutableMap.of(journalPrefix + "0", data.get(journalPrefix + "0"), journalPrefix + "1", ImmutableList.of());
     journalService.setEvents(firstBatch);
 
     while (countEvents(task) != 2) {
@@ -2003,28 +2031,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     Assert.assertEquals(Status.PAUSED, task.getRunner().getStatus());
 
     // Insert remaining data
-    ByteString frag3 = ByteString.copyFromUtf8(String.join("\n",
-            jb("2011", "e", "y", "10", "20.0", "1.0"),
-            jb("246140482-04-24T15:36:27.903Z", "x", "z", "10", "20.0", "1.0"),
-            "unparseable",
-            "unparseable2"));
-
-    ByteString frag4 = ByteString.copyFromUtf8(String.join("\n",
-            jb("2013", "f", "y", "10", "20.0", "1.0"),
-            jb("2049", "f", "y", "notanumber", "20.0", "1.0")));
-
-    ByteString frag5 = ByteString.copyFromUtf8(String.join("\n",
-            jb("2049", "f", "y", "10", "notanumber", "1.0"),
-            jb("2049", "f", "y", "10", "20.0", "notanumber")));
-
-
-
-    Map<String, List<ByteString>> rest = ImmutableMap.of(
-            journalPrefix + "0", ImmutableList.of(frag3, frag4, frag5),
-            journalPrefix + "1", ImmutableList.of(ByteString.copyFromUtf8(String.join("\n",
-                    jb("2012", "g", "y", "10", "20.0", "1.0"),
-                    jb("2011", "h", "y", "10", "20.0", "1.0")))));
-    journalService.addEvents(rest);
+    journalService.addEvents(ImmutableMap.of(journalPrefix + "1", data.get(journalPrefix + "1")));
 
     try {
       future.get(10, TimeUnit.SECONDS);
@@ -2068,8 +2075,8 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 2L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 5L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", Long.MAX_VALUE)),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -2129,10 +2136,11 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
   @Test(timeout = 60_000L)
   public void testRunContextSequenceAheadOfStartingOffsets() throws Exception
   {
-    final TreeMap<Integer, Map<Integer, Long>> sequences = new TreeMap<>();
+    journalService.setEvents(generateRecords(journalPrefix));
+    final TreeMap<Integer, Map<String, Long>> sequences = new TreeMap<>();
     // Here the sequence number is 1 meaning that one incremental handoff was done by the failed task
     // and this task should start reading from offset 2 for partition 0
-    sequences.put(1, ImmutableMap.of(0, 2L));
+    sequences.put(1, ImmutableMap.of(journalPrefix + "0", partition0Offsets[2]));
     final Map<String, Object> context = new HashMap<>();
     context.put(
         SeekableStreamSupervisor.CHECKPOINTS_CTX_KEY,
@@ -2145,8 +2153,8 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
             0,
             "sequence0",
             // task should ignore these and use sequence info sent in the context
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 0L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 5L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 0L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[5])),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -2176,7 +2184,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         publishedDescriptors()
     );
     Assert.assertEquals(
-        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 5L))),
+        new GazetteDataSourceMetadata(new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[4]))),
         newDataSchemaMetadata()
     );
   }
@@ -2189,8 +2197,8 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
         new GazetteIndexTaskIOConfig(
             0,
             "sequence0",
-            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 200L), ImmutableSet.of()),
-            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of("0", 500L)),
+            new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 200L), ImmutableSet.of()),
+            new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 500L)),
             GazetteSupervisorIOConfig.DEFAULT_POLL_TIMEOUT_MILLIS,
             "localhost:8080",
             true,
@@ -2208,12 +2216,12 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
 
     // first setEndOffsets request
     task.getRunner().pause();
-    task.getRunner().setEndOffsets(ImmutableMap.of("0", 500L), true);
+    task.getRunner().setEndOffsets(ImmutableMap.of(journalPrefix + "0", 500L), true);
     Assert.assertEquals(Status.READING, task.getRunner().getStatus());
 
     // duplicate setEndOffsets request
     task.getRunner().pause();
-    task.getRunner().setEndOffsets(ImmutableMap.of("0", 500L), true);
+    task.getRunner().setEndOffsets(ImmutableMap.of(journalPrefix + "0", 500L), true);
     Assert.assertEquals(Status.READING, task.getRunner().getStatus());
   }
 
@@ -2221,19 +2229,20 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
   @Test(timeout = 60_000L)
   public void testCanStartFromLaterThanEarliestOffset() throws Exception
   {
+    journalService.setEvents(generateRecords(journalPrefix));
     final String baseSequenceName = "sequence0";
     maxRowsPerSegment = Integer.MAX_VALUE;
     maxTotalRows = null;
 
     final SeekableStreamStartSequenceNumbers<String, Long> startPartitions = new SeekableStreamStartSequenceNumbers<>(
         journalPrefix,
-        ImmutableMap.of("0", 0L, "1", 1L),
+        ImmutableMap.of(journalPrefix + "0", 0L, journalPrefix + "1", partition0Offsets[1]),
         ImmutableSet.of()
     );
 
     final SeekableStreamEndSequenceNumbers<String, Long> endPartitions = new SeekableStreamEndSequenceNumbers<>(
         journalPrefix,
-        ImmutableMap.of("0", 10L, "1", 2L)
+        ImmutableMap.of(journalPrefix + "0", partition0Offsets[10], journalPrefix + "1", partition0Offsets[2])
     );
 
     final GazetteIndexTask task = createTask(

@@ -89,7 +89,6 @@ public class GazetteRecordSupplier implements RecordSupplier<String, Long>
   public void seekToLatest(Set<StreamPartition<String>> partitions)
   {
     consumer.seekToLatest(partitions.stream().map(p -> p.getPartitionId()).collect(Collectors.toSet()));
-
   }
 
   @Override

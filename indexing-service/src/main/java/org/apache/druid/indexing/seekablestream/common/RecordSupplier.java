@@ -39,7 +39,7 @@ import java.util.Set;
 public interface RecordSupplier<PartitionIdType, SequenceOffsetType> extends Closeable
 {
   /**
-   * assigns the given partitions to this RecordSupplier
+   * assigns the given partitions to this RecordSupplier, overwriting the previous assignment.
    *
    * @param partitions parititions to assign
    */
