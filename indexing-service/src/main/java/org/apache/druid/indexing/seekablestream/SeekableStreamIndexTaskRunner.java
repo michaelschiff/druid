@@ -602,6 +602,13 @@ public abstract class SeekableStreamIndexTaskRunner<PartitionIdType, SequenceOff
             // partitions upon resuming. Don't call "seekToStartingSequence" after "assignPartitions", because there's
             // no need to re-seek here. All we're going to be doing is dropping partitions.
             assignment = assignPartitions(recordSupplier);
+
+            // The comment above can cause a perma-hang. Scenario is like:
+            // we read a record, it is the end record of the interval, so should process is false.  This means
+            // currOffsets doesnt get updated. Since ints the end of the interval it is removed from the assignment too
+            // currOffsets stays what it was and gets saved in a checkpoint.  Later the checkpoint is reassigned to us,
+            // but if we dont seek we just keep fetching the end record, never seeing one, so the partition gets kept forever.
+            seekToStartingSequence(recordSupplier, assignment);
             possiblyResetDataSourceMetadata(toolbox, recordSupplier, assignment);
 
             if (assignment.isEmpty()) {

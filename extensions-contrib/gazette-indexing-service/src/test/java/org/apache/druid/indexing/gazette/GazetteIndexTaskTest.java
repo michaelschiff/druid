@@ -249,31 +249,47 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     ByteString frag1 = ByteString.copyFromUtf8(String.join("", partition0[0], partition0[1], partition0[2], partition0[3]));
     ByteString frag2 = ByteString.copyFromUtf8(String.join("", partition0[4], partition0[5], partition0[6], partition0[7]));
     ByteString frag3 = ByteString.copyFromUtf8(String.join("", partition0[8], partition0[9]));
-    ByteString frag4 = ByteString.copyFromUtf8(String.join("", partition0[10], partition0[11], partition0[12]));
+    ByteString frag4 = ByteString.copyFromUtf8(String.join("", partition0[10], partition0[11], partition0[12], partition0[13]));
 
     return ImmutableMap.of(
             journalPrefix + "0", ImmutableList.of(frag1, frag2, frag3, frag4),
-            journalPrefix + "1", ImmutableList.of(ByteString.copyFromUtf8(String.join("", partition1[0], partition1[1]))));
+            journalPrefix + "1", ImmutableList.of(ByteString.copyFromUtf8(String.join("", partition1[0], partition1[1], partition1[2]))));
   }
 
   private static Map<String, List<ByteString>> generateSinglePartitionRecords(String journalPrefix)
   {
 
-    return ImmutableMap.of(journalPrefix + "0", ImmutableList.of(
-            ByteString.copyFromUtf8(String.join("\n", jb("2008", "a", "y", "10", "20.0", "1.0"),
-                    jb("2009", "b", "y", "10", "20.0", "1.0"),
-                    jb("2010", "c", "y", "10", "20.0", "1.0"))),
-            ByteString.copyFromUtf8(String.join("\n", jb("2011", "d", "y", "10", "20.0", "1.0"),
-                    jb("2011", "D", "y", "10", "20.0", "1.0"))),
-            ByteString.copyFromUtf8(String.join("\n", jb("2012", "e", "y", "10", "20.0", "1.0"),
-                    jb("2009", "B", "y", "10", "20.0", "1.0"),
-                    jb("2008", "A", "x", "10", "20.0", "1.0"),
-                    jb("2009", "B", "x", "10", "20.0", "1.0"),
-                    jb("2010", "C", "x", "10", "20.0", "1.0"))),
-            ByteString.copyFromUtf8(String.join("\n", jb("2011", "D", "x", "10", "20.0", "1.0"),
-                    jb("2011", "d", "x", "10", "20.0", "1.0"),
-                    jb("2012", "E", "x", "10", "20.0", "1.0"),
-                    jb("2009", "b", "x", "10", "20.0", "1.0")))));
+    String[] partition0 = new String[] {
+            jb("2008", "a", "y", "10", "20.0", "1.0") + "\n",
+            jb("2009", "b", "y", "10", "20.0", "1.0") + "\n",
+            jb("2010", "c", "y", "10", "20.0", "1.0") + "\n",
+            jb("2011", "d", "y", "10", "20.0", "1.0") + "\n",
+            jb("2011", "D", "y", "10", "20.0", "1.0") + "\n",
+            jb("2012", "e", "y", "10", "20.0", "1.0") + "\n",
+            jb("2009", "B", "y", "10", "20.0", "1.0") + "\n",
+            jb("2008", "A", "x", "10", "20.0", "1.0") + "\n",
+            jb("2009", "B", "x", "10", "20.0", "1.0") + "\n",
+            jb("2010", "C", "x", "10", "20.0", "1.0") + "\n",
+            jb("2011", "D", "x", "10", "20.0", "1.0") + "\n",
+            jb("2011", "d", "x", "10", "20.0", "1.0") + "\n",
+            jb("2012", "E", "x", "10", "20.0", "1.0") + "\n",
+            jb("2009", "b", "x", "10", "20.0", "1.0") + "\n"
+    };
+
+    partition0Offsets = new long[partition0.length];
+    long soFar = 0;
+    for (int i = 0; i < partition0Offsets.length; i++) {
+      partition0Offsets[i] = soFar;
+      if (i < partition0.length) {
+        soFar += partition0[i].length();
+      }
+    }
+    ByteString frag1 = ByteString.copyFromUtf8(String.join("", partition0[0], partition0[1], partition0[2], partition0[3]));
+    ByteString frag2 = ByteString.copyFromUtf8(String.join("", partition0[4], partition0[5], partition0[6], partition0[7]));
+    ByteString frag3 = ByteString.copyFromUtf8(String.join("", partition0[8], partition0[9]));
+    ByteString frag4 = ByteString.copyFromUtf8(String.join("", partition0[10], partition0[11], partition0[12], partition0[13]));
+
+    return ImmutableMap.of(journalPrefix + "0", ImmutableList.of(frag1, frag2, frag3, frag4));
   }
 
   private static String getTopicName()
@@ -584,7 +600,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     // of events fetched across two partitions from Gazette
     final SeekableStreamEndSequenceNumbers<String, Long> checkpoint1 = new SeekableStreamEndSequenceNumbers<>(
         journalPrefix,
-        ImmutableMap.of(journalPrefix + "0", partition0Offsets[4], journalPrefix + "1", 0L)
+        ImmutableMap.of(journalPrefix + "0", partition0Offsets[4], journalPrefix + "1", partition1Offsets[0])
     );
     final SeekableStreamEndSequenceNumbers<String, Long> checkpoint2 = new SeekableStreamEndSequenceNumbers<>(
         journalPrefix,
@@ -871,7 +887,7 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     return metadataStorageCoordinator.retrieveDataSourceMetadata(NEW_DATA_SCHEMA.getDataSource());
   }
 
-  @Test(timeout = 60_000L)
+  @Test//(timeout = 60_000L)
   public void testIncrementalHandOffReadsThroughEndOffsets() throws Exception
   {
 
@@ -882,11 +898,11 @@ public class GazetteIndexTaskTest extends SeekableStreamIndexTaskTestBase
     journalService.setEvents(generateSinglePartitionRecords(journalPrefix));
 
     final SeekableStreamStartSequenceNumbers<String, Long> startPartitions =
-        new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 0L), ImmutableSet.of());
+        new SeekableStreamStartSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[0]), ImmutableSet.of());
     final SeekableStreamEndSequenceNumbers<String, Long> checkpoint1 =
-        new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 5L));
+        new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[5]));
     final SeekableStreamEndSequenceNumbers<String, Long> checkpoint2 =
-        new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", 9L));
+        new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", partition0Offsets[9]));
     final SeekableStreamEndSequenceNumbers<String, Long> endPartitions =
         new SeekableStreamEndSequenceNumbers<>(journalPrefix, ImmutableMap.of(journalPrefix + "0", Long.MAX_VALUE));
 
