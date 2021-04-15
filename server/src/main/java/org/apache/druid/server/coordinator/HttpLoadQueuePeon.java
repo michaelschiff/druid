@@ -227,7 +227,7 @@ public class HttpLoadQueuePeon extends LoadQueuePeon
                             break;
                           default:
                             scheduleNextRunImmediately = false;
-                            log.error("WTF! Server[%s] returned unknown state in status[%s].", serverId, e.getStatus());
+                            log.error("Server[%s] returned unknown state in status[%s].", serverId, e.getStatus());
                         }
                       }
                     }
@@ -426,6 +426,12 @@ public class HttpLoadQueuePeon extends LoadQueuePeon
   public Set<DataSegment> getSegmentsToDrop()
   {
     return Collections.unmodifiableSet(segmentsToDrop.keySet());
+  }
+
+  @Override
+  public Set<DataSegment> getTimedOutSegments()
+  {
+    return Collections.emptySet();
   }
 
   @Override

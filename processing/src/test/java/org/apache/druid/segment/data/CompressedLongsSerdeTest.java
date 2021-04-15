@@ -25,8 +25,14 @@ import it.unimi.dsi.fastutil.ints.IntArrays;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.guava.CloseQuietly;
 import org.apache.druid.segment.writeout.OffHeapMemorySegmentWriteOutMedium;
+import org.apache.druid.segment.writeout.SegmentWriteOutMedium;
+import org.apache.druid.segment.writeout.TmpFileSegmentWriteOutMediumFactory;
 import org.junit.Assert;
+import org.junit.Ignore;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.ExpectedException;
+import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
@@ -57,6 +63,12 @@ public class CompressedLongsSerdeTest
     }
     return data;
   }
+
+  @Rule
+  public TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+  @Rule
+  public ExpectedException expectedException = ExpectedException.none();
 
   protected final CompressionFactory.LongEncodingStrategy encodingStrategy;
   protected final CompressionStrategy compressionStrategy;
@@ -121,6 +133,38 @@ public class CompressedLongsSerdeTest
     testWithValues(chunk);
   }
 
+  // this test takes ~50 minutes to run (even skipping 'auto')
+  @Ignore
+  @Test
+  public void testTooManyValues() throws IOException
+  {
+    // uncomment this if 'auto' encoded long unbounded heap usage gets put in check and this can actually pass
+    if (encodingStrategy.equals(CompressionFactory.LongEncodingStrategy.AUTO)) {
+      return;
+    }
+    expectedException.expect(ColumnCapacityExceededException.class);
+    expectedException.expectMessage(ColumnCapacityExceededException.formatMessage("test"));
+    try (
+        SegmentWriteOutMedium segmentWriteOutMedium =
+            TmpFileSegmentWriteOutMediumFactory.instance().makeSegmentWriteOutMedium(temporaryFolder.newFolder())
+    ) {
+      ColumnarLongsSerializer serializer = CompressionFactory.getLongSerializer(
+          "test",
+          segmentWriteOutMedium,
+          "test",
+          order,
+          encodingStrategy,
+          compressionStrategy
+      );
+      serializer.open();
+
+      final long numRows = Integer.MAX_VALUE + 100L;
+      for (long i = 0L; i < numRows; i++) {
+        serializer.add(ThreadLocalRandom.current().nextLong());
+      }
+    }
+  }
+
   public void testWithValues(long[] values) throws Exception
   {
     testValues(values);
@@ -130,6 +174,7 @@ public class CompressedLongsSerdeTest
   public void testValues(long[] values) throws Exception
   {
     ColumnarLongsSerializer serializer = CompressionFactory.getLongSerializer(
+        "test",
         new OffHeapMemorySegmentWriteOutMedium(),
         "test",
         order,
@@ -179,11 +224,17 @@ public class CompressedLongsSerdeTest
     Assert.assertEquals(vals.length, indexed.size());
 
     // sequential access
+    long[] vector = new long[256];
     int[] indices = new int[vals.length];
     for (int i = 0; i < indexed.size(); ++i) {
+      if (i % 256 == 0) {
+        indexed.get(vector, i, Math.min(256, indexed.size() - i));
+      }
       Assert.assertEquals(vals[i], indexed.get(i));
+      Assert.assertEquals(vals[i], vector[i % 256]);
       indices[i] = i;
     }
+
 
     // random access, limited to 1000 elements for large lists (every element would take too long)
     IntArrays.shuffle(indices, ThreadLocalRandom.current());

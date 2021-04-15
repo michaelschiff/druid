@@ -33,6 +33,7 @@ import org.apache.druid.java.util.http.client.response.StatusResponseHandler;
 import org.apache.druid.java.util.http.client.response.StatusResponseHolder;
 import org.apache.druid.query.lookup.LookupsState;
 import org.apache.druid.server.coordinator.CoordinatorDynamicConfig;
+import org.apache.druid.server.coordinator.rules.Rule;
 import org.apache.druid.server.lookup.cache.LookupExtractorFactoryMapContainer;
 import org.apache.druid.testing.IntegrationTestingConfig;
 import org.apache.druid.testing.guice.TestClient;
@@ -79,6 +80,11 @@ public class CoordinatorResourceTestClient
     return StringUtils.format("%smetadata/datasources/%s/segments", getCoordinatorURL(), StringUtils.urlEncode(dataSource));
   }
 
+  private String getFullSegmentsMetadataURL(String dataSource)
+  {
+    return StringUtils.format("%smetadata/datasources/%s/segments?full", getCoordinatorURL(), StringUtils.urlEncode(dataSource));
+  }
+
   private String getIntervalsURL(String dataSource)
   {
     return StringUtils.format("%sdatasources/%s/intervals", getCoordinatorURL(), StringUtils.urlEncode(dataSource));
@@ -89,9 +95,9 @@ public class CoordinatorResourceTestClient
     return StringUtils.format("%sdatasources/%s/segments?full", getCoordinatorURL(), StringUtils.urlEncode(dataSource));
   }
 
-  private String getLoadStatusURL()
+  private String getLoadStatusURL(String dataSource)
   {
-    return StringUtils.format("%s%s", getCoordinatorURL(), "loadstatus");
+    return StringUtils.format("%sdatasources/%s/loadstatus?forceMetadataRefresh=true&interval=1970-01-01/2999-01-01", getCoordinatorURL(), StringUtils.urlEncode(dataSource));
   }
 
   /** return a list of the segment dates for the specified data source */
@@ -103,6 +109,24 @@ public class CoordinatorResourceTestClient
 
       segments = jsonMapper.readValue(
           response.getContent(), new TypeReference<List<String>>()
+          {
+          }
+      );
+    }
+    catch (Exception e) {
+      throw new RuntimeException(e);
+    }
+    return segments;
+  }
+
+  public List<DataSegment> getFullSegmentsMetadata(final String dataSource)
+  {
+    List<DataSegment> segments;
+    try {
+      StatusResponseHolder response = makeRequest(HttpMethod.GET, getFullSegmentsMetadataURL(dataSource));
+
+      segments = jsonMapper.readValue(
+          response.getContent(), new TypeReference<List<DataSegment>>()
           {
           }
       );
@@ -149,11 +173,27 @@ public class CoordinatorResourceTestClient
     }
   }
 
-  private Map<String, Integer> getLoadStatus()
+  private Map<String, Integer> getLoadStatus(String dataSorce)
   {
+    String url = getLoadStatusURL(dataSorce);
     Map<String, Integer> status;
     try {
-      StatusResponseHolder response = makeRequest(HttpMethod.GET, getLoadStatusURL());
+      StatusResponseHolder response = httpClient.go(
+          new Request(HttpMethod.GET, new URL(url)),
+          responseHandler
+      ).get();
+
+      if (response.getStatus().getCode() == HttpResponseStatus.NO_CONTENT.getCode()) {
+        return null;
+      }
+      if (response.getStatus().getCode() != HttpResponseStatus.OK.getCode()) {
+        throw new ISE(
+            "Error while making request to url[%s] status[%s] content[%s]",
+            url,
+            response.getStatus(),
+            response.getContent()
+        );
+      }
 
       status = jsonMapper.readValue(
           response.getContent(), new TypeReference<Map<String, Integer>>()
@@ -169,8 +209,8 @@ public class CoordinatorResourceTestClient
 
   public boolean areSegmentsLoaded(String dataSource)
   {
-    final Map<String, Integer> status = getLoadStatus();
-    return (status.containsKey(dataSource) && status.get(dataSource) == 100.0);
+    final Map<String, Integer> status = getLoadStatus(dataSource);
+    return (status != null && status.containsKey(dataSource) && status.get(dataSource) == 100.0);
   }
 
   public void unloadSegmentsForDataSource(String dataSource)
@@ -324,6 +364,26 @@ public class CoordinatorResourceTestClient
         new Request(HttpMethod.POST, new URL(url)).setContent(
             "application/json",
             jsonMapper.writeValueAsBytes(coordinatorDynamicConfig)
+        ), responseHandler
+    ).get();
+
+    if (!response.getStatus().equals(HttpResponseStatus.OK)) {
+      throw new ISE(
+          "Error while setting dynamic config[%s] status[%s] content[%s]",
+          url,
+          response.getStatus(),
+          response.getContent()
+      );
+    }
+  }
+
+  public void postLoadRules(String datasourceName, List<Rule> rules) throws Exception
+  {
+    String url = StringUtils.format("%srules/%s", getCoordinatorURL(), datasourceName);
+    StatusResponseHolder response = httpClient.go(
+        new Request(HttpMethod.POST, new URL(url)).setContent(
+            "application/json",
+            jsonMapper.writeValueAsBytes(rules)
         ), responseHandler
     ).get();
 

@@ -30,10 +30,13 @@ import io.github.resilience4j.bulkhead.BulkheadRegistry;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import org.apache.druid.client.SegmentServerSelector;
 import org.apache.druid.java.util.common.concurrent.Execs;
+import org.apache.druid.java.util.common.guava.LazySequence;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryCapacityExceededException;
 import org.apache.druid.query.QueryContexts;
 import org.apache.druid.query.QueryPlus;
+import org.apache.druid.query.QueryRunner;
 import org.apache.druid.query.QueryWatcher;
 import org.apache.druid.server.initialization.ServerConfig;
 
@@ -141,6 +144,17 @@ public class QueryScheduler implements QueryWatcher
   }
 
   /**
+   * Returns a {@link QueryRunner} that will call {@link QueryScheduler#run} when {@link QueryRunner#run} is called.
+   */
+  public <T> QueryRunner<T> wrapQueryRunner(QueryRunner<T> baseRunner)
+  {
+    return (queryPlus, responseContext) ->
+        QueryScheduler.this.run(
+            queryPlus.getQuery(), new LazySequence<>(() -> baseRunner.run(queryPlus, responseContext))
+        );
+  }
+
+  /**
    * Forcibly cancel all futures that have been registered to a specific query id
    */
   public boolean cancelQuery(String id)
@@ -202,7 +216,7 @@ public class QueryScheduler implements QueryWatcher
       laneConfig.ifPresent(config -> {
         Bulkhead laneLimiter = laneRegistry.bulkhead(lane, config);
         if (!laneLimiter.tryAcquirePermission()) {
-          throw new QueryCapacityExceededException(lane);
+          throw new QueryCapacityExceededException(lane, config.getMaxConcurrentCalls());
         }
         hallPasses.add(laneLimiter);
       });
@@ -214,7 +228,7 @@ public class QueryScheduler implements QueryWatcher
       totalConfig.ifPresent(config -> {
         Bulkhead totalLimiter = laneRegistry.bulkhead(TOTAL, config);
         if (!totalLimiter.tryAcquirePermission()) {
-          throw new QueryCapacityExceededException();
+          throw new QueryCapacityExceededException(config.getMaxConcurrentCalls());
         }
         hallPasses.add(totalLimiter);
       });

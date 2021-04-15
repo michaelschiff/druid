@@ -174,7 +174,7 @@ The `inputFormat` to load data of ORC format. An example is:
           "expr": "$.path.to.nested"
         }
       ]
-    }
+    },
     "binaryAsString": false
   },
   ...
@@ -208,7 +208,7 @@ The `inputFormat` to load data of Parquet format. An example is:
           "expr": "$.path.to.nested"
         }
       ]
-    }
+    },
     "binaryAsString": false
   },
   ...
@@ -221,6 +221,55 @@ The Parquet `inputFormat` has the following components:
 |-------|------|-------------|----------|
 |type| String| This should be set to `parquet` to read Parquet file| yes |
 |flattenSpec| JSON Object |Define a [`flattenSpec`](#flattenspec) to extract nested values from a Parquet file. Note that only 'path' expression are supported ('jq' is unavailable).| no (default will auto-discover 'root' level properties) |
+| binaryAsString | Boolean | Specifies if the bytes parquet column which is not logically marked as a string or enum type should be treated as a UTF-8 encoded string. | no (default = false) |
+
+### Avro OCF
+
+> You need to include the [`druid-avro-extensions`](../development/extensions-core/avro.md) as an extension to use the Avro OCF input format.
+
+> See the [Avro Types](../development/extensions-core/avro.md#avro-types) section for how Avro types are handled in Druid
+
+The `inputFormat` to load data of Avro OCF format. An example is:
+```json
+"ioConfig": {
+  "inputFormat": {
+    "type": "avro_ocf",
+    "flattenSpec": {
+      "useFieldDiscovery": true,
+      "fields": [
+        {
+          "type": "path",
+          "name": "someRecord_subInt",
+          "expr": "$.someRecord.subInt"
+        }
+      ]
+    },
+    "schema": {
+      "namespace": "org.apache.druid.data.input",
+      "name": "SomeDatum",
+      "type": "record",
+      "fields" : [
+        { "name": "timestamp", "type": "long" },
+        { "name": "eventType", "type": "string" },
+        { "name": "id", "type": "long" },
+        { "name": "someRecord", "type": {
+          "type": "record", "name": "MySubRecord", "fields": [
+            { "name": "subInt", "type": "int"},
+            { "name": "subLong", "type": "long"}
+          ]
+        }}]
+    },
+    "binaryAsString": false
+  },
+  ...
+}
+```
+
+| Field | Type | Description | Required |
+|-------|------|-------------|----------|
+|type| String| This should be set to `avro_ocf` to read Avro OCF file| yes |
+|flattenSpec| JSON Object |Define a [`flattenSpec`](#flattenspec) to extract nested values from a Avro records. Note that only 'path' expression are supported ('jq' is unavailable).| no (default will auto-discover 'root' level properties) |
+|schema| JSON Object |Define a reader schema to be used when parsing Avro records, this is useful when parsing multiple versions of Avro OCF file data | no (default will decode using the writer schema contained in the OCF file) |
 | binaryAsString | Boolean | Specifies if the bytes parquet column which is not logically marked as a string or enum type should be treated as a UTF-8 encoded string. | no (default = false) |
 
 ### FlattenSpec
@@ -280,7 +329,7 @@ and [Kinesis indexing service](../development/extensions-core/kinesis-ingestion.
 Consider using the [input format](#input-format) instead for these types of ingestion.
 
 This section lists all default and core extension parsers.
-For community extension parsers, please see our [community extensions list](../development/extensions.html#community-extensions).
+For community extension parsers, please see our [community extensions list](../development/extensions.md#community-extensions).
 
 ### String Parser
 
@@ -295,6 +344,8 @@ Each line can be further parsed using [`parseSpec`](#parsespec).
 ### Avro Hadoop Parser
 
 > You need to include the [`druid-avro-extensions`](../development/extensions-core/avro.md) as an extension to use the Avro Hadoop Parser.
+
+> See the [Avro Types](../development/extensions-core/avro.md#avro-types) section for how Avro types are handled in Druid
 
 This parser is for [Hadoop batch ingestion](./hadoop.md).
 The `inputFormat` of `inputSpec` in `ioConfig` must be set to `"org.apache.druid.data.input.avro.AvroValueInputFormat"`.
@@ -372,7 +423,7 @@ the set of ingested dimensions, if missing the discovered fields will make up th
 
 `timeAndDims` parse spec must specify which fields will be extracted as dimensions through the `dimensionSpec`.
 
-[All column types](https://orc.apache.org/docs/types.html) are supported, with the exception of `union` types. Columns of
+[All column types](https://orc.apache.org/docs/types.md) are supported, with the exception of `union` types. Columns of
  `list` type, if filled with primitives, may be used as a multi-value dimension, or specific elements can be extracted with
 `flattenSpec` expressions. Likewise, primitive fields may be extracted from `map` and `struct` types in the same manner.
 Auto field discovery will automatically create a string dimension for every (non-timestamp) primitive or `list` of
@@ -607,7 +658,7 @@ JSON path expressions for all supported types.
 
 When the time dimension is a [DateType column](https://github.com/apache/parquet-format/blob/master/LogicalTypes.md),
 a format should not be supplied. When the format is UTF8 (String), either `auto` or a explicitly defined
-[format](http://www.joda.org/joda-time/apidocs/org/joda/time/format/DateTimeFormat.html) is required.
+[format](http://www.joda.org/joda-time/apidocs/org/joda/time/format/DateTimeFormat) is required.
 
 #### Parquet Hadoop Parser vs Parquet Avro Hadoop Parser
 
@@ -757,7 +808,7 @@ Note that the `int96` Parquet value type is not supported with this parser.
 
 When the time dimension is a [DateType column](https://github.com/apache/parquet-format/blob/master/LogicalTypes.md),
 a format should not be supplied. When the format is UTF8 (String), either `auto` or
-an explicitly defined [format](http://www.joda.org/joda-time/apidocs/org/joda/time/format/DateTimeFormat.html) is required.
+an explicitly defined [format](http://www.joda.org/joda-time/apidocs/org/joda/time/format/DateTimeFormat) is required.
 
 #### Example
 
@@ -817,6 +868,8 @@ an explicitly defined [format](http://www.joda.org/joda-time/apidocs/org/joda/ti
 ### Avro Stream Parser
 
 > You need to include the [`druid-avro-extensions`](../development/extensions-core/avro.md) as an extension to use the Avro Stream Parser.
+
+> See the [Avro Types](../development/extensions-core/avro.md#avro-types) section for how Avro types are handled in Druid
 
 This parser is for [stream ingestion](./index.md#streaming) and reads Avro data from a stream directly.
 
@@ -963,12 +1016,43 @@ For details, see the Schema Registry [documentation](http://docs.confluent.io/cu
 | type | String | This should say `schema_registry`. | no |
 | url | String | Specifies the url endpoint of the Schema Registry. | yes |
 | capacity | Integer | Specifies the max size of the cache (default = Integer.MAX_VALUE). | no |
+| urls | Array<String> | Specifies the url endpoints of the multiple Schema Registry instances. | yes(if `url` is not provided) |
+| config | Json | To send additional configurations, configured for Schema Registry | no |
+| headers | Json | To send headers to the Schema Registry | no |
 
+For a single schema registry instance, use Field `url` or `urls` for multi instances.
+
+Single Instance:
 ```json
 ...
 "avroBytesDecoder" : {
    "type" : "schema_registry",
    "url" : <schema-registry-url>
+}
+...
+```
+
+Multiple Instances:
+```json
+...
+"avroBytesDecoder" : {
+   "type" : "schema_registry",
+   "urls" : [<schema-registry-url-1>, <schema-registry-url-2>, ...],
+   "config" : {
+        "basic.auth.credentials.source": "USER_INFO",
+        "basic.auth.user.info": "fred:letmein",
+        "schema.registry.ssl.truststore.location": "/some/secrets/kafka.client.truststore.jks",
+        "schema.registry.ssl.truststore.password": "<password>",
+        "schema.registry.ssl.keystore.location": "/some/secrets/kafka.client.keystore.jks",
+        "schema.registry.ssl.keystore.password": "<password>",
+        "schema.registry.ssl.key.password": "<password>"
+       ... 
+   },
+   "headers": {
+       "traceID" : "b29c5de2-0db4-490b-b421",
+       "timeStamp" : "1577191871865",
+       ...
+    }
 }
 ...
 ```

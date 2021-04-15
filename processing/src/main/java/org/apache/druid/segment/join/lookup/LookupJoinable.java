@@ -21,6 +21,7 @@ package org.apache.druid.segment.join.lookup;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
+import org.apache.druid.java.util.common.io.Closer;
 import org.apache.druid.query.lookup.LookupExtractor;
 import org.apache.druid.segment.ColumnSelectorFactory;
 import org.apache.druid.segment.column.ColumnCapabilities;
@@ -31,7 +32,10 @@ import org.apache.druid.segment.join.JoinMatcher;
 import org.apache.druid.segment.join.Joinable;
 
 import javax.annotation.Nullable;
+import java.io.Closeable;
+import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 public class LookupJoinable implements Joinable
@@ -80,14 +84,16 @@ public class LookupJoinable implements Joinable
   public JoinMatcher makeJoinMatcher(
       final ColumnSelectorFactory leftSelectorFactory,
       final JoinConditionAnalysis condition,
-      final boolean remainderNeeded
+      final boolean remainderNeeded,
+      boolean descending,
+      Closer closer
   )
   {
     return LookupJoinMatcher.create(extractor, leftSelectorFactory, condition, remainderNeeded);
   }
 
   @Override
-  public Set<String> getCorrelatedColumnValues(
+  public Optional<Set<String>> getCorrelatedColumnValues(
       String searchColumnName,
       String searchColumnValue,
       String retrievalColumnName,
@@ -95,18 +101,23 @@ public class LookupJoinable implements Joinable
       boolean allowNonKeyColumnSearch
   )
   {
+    if (!ALL_COLUMNS.contains(searchColumnName) || !ALL_COLUMNS.contains(retrievalColumnName)) {
+      return Optional.empty();
+    }
     Set<String> correlatedValues;
     if (LookupColumnSelectorFactory.KEY_COLUMN.equals(searchColumnName)) {
       if (LookupColumnSelectorFactory.KEY_COLUMN.equals(retrievalColumnName)) {
         correlatedValues = ImmutableSet.of(searchColumnValue);
       } else {
-        correlatedValues = ImmutableSet.of(extractor.apply(searchColumnName));
+        // This should not happen in practice because the column to be joined on must be a key.
+        correlatedValues = Collections.singleton(extractor.apply(searchColumnValue));
       }
     } else {
       if (!allowNonKeyColumnSearch) {
-        return ImmutableSet.of();
+        return Optional.empty();
       }
       if (LookupColumnSelectorFactory.VALUE_COLUMN.equals(retrievalColumnName)) {
+        // This should not happen in practice because the column to be joined on must be a key.
         correlatedValues = ImmutableSet.of(searchColumnValue);
       } else {
         // Lookup extractor unapply only provides a list of strings, so we can't respect
@@ -114,6 +125,13 @@ public class LookupJoinable implements Joinable
         correlatedValues = ImmutableSet.copyOf(extractor.unapply(searchColumnValue));
       }
     }
-    return correlatedValues;
+    return Optional.of(correlatedValues);
+  }
+
+  @Override
+  public Optional<Closeable> acquireReferences()
+  {
+    // nothing to close for lookup joinables, they are managed externally and have no per query accounting of usage
+    return Optional.of(() -> {});
   }
 }

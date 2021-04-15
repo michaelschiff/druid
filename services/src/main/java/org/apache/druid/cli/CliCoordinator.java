@@ -25,6 +25,7 @@ import com.google.inject.Binder;
 import com.google.inject.Inject;
 import com.google.inject.Key;
 import com.google.inject.Module;
+import com.google.inject.Provider;
 import com.google.inject.Provides;
 import com.google.inject.name.Names;
 import io.airlift.airline.Command;
@@ -72,6 +73,7 @@ import org.apache.druid.server.coordinator.LoadQueueTaskMaster;
 import org.apache.druid.server.coordinator.duty.CoordinatorDuty;
 import org.apache.druid.server.coordinator.duty.KillUnusedSegments;
 import org.apache.druid.server.http.ClusterResource;
+import org.apache.druid.server.http.CompactionResource;
 import org.apache.druid.server.http.CoordinatorCompactionConfigsResource;
 import org.apache.druid.server.http.CoordinatorDynamicConfigsResource;
 import org.apache.druid.server.http.CoordinatorRedirectInfo;
@@ -196,6 +198,7 @@ public class CliCoordinator extends ServerRunnable
                   .to(CoordinatorJettyServerInitializer.class);
 
             Jerseys.addResource(binder, CoordinatorResource.class);
+            Jerseys.addResource(binder, CompactionResource.class);
             Jerseys.addResource(binder, CoordinatorDynamicConfigsResource.class);
             Jerseys.addResource(binder, CoordinatorCompactionConfigsResource.class);
             Jerseys.addResource(binder, TiersResource.class);
@@ -253,7 +256,7 @@ public class CliCoordinator extends ServerRunnable
           @Provides
           @LazySingleton
           public LoadQueueTaskMaster getLoadQueueTaskMaster(
-              CuratorFramework curator,
+              Provider<CuratorFramework> curatorFrameworkProvider,
               ObjectMapper jsonMapper,
               ScheduledExecutorFactory factory,
               DruidCoordinatorConfig config,
@@ -274,7 +277,7 @@ public class CliCoordinator extends ServerRunnable
             }
             ExecutorServices.manageLifecycle(lifecycle, callBackExec);
             return new LoadQueueTaskMaster(
-                curator,
+                curatorFrameworkProvider,
                 jsonMapper,
                 factory.create(1, "Master-PeonExec--%d"),
                 callBackExec,

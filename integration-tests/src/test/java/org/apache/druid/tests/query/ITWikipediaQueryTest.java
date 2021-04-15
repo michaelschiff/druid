@@ -21,11 +21,10 @@ package org.apache.druid.tests.query;
 
 import com.google.common.collect.ImmutableMap;
 import com.google.inject.Inject;
-import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.http.client.response.StatusResponseHolder;
 import org.apache.druid.query.Druids;
+import org.apache.druid.query.QueryCapacityExceededException;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
-import org.apache.druid.server.QueryCapacityExceededException;
 import org.apache.druid.testing.IntegrationTestingConfig;
 import org.apache.druid.testing.clients.CoordinatorResourceTestClient;
 import org.apache.druid.testing.clients.QueryResourceTestClient;
@@ -48,7 +47,7 @@ import java.util.concurrent.Future;
 @Guice(moduleFactory = DruidTestModuleFactory.class)
 public class ITWikipediaQueryTest
 {
-  private static final String WIKIPEDIA_DATA_SOURCE = "wikipedia_editstream";
+  public static final String WIKIPEDIA_DATA_SOURCE = "wikipedia_editstream";
   private static final String WIKI_LOOKUP = "wiki-simple";
   private static final String WIKIPEDIA_QUERIES_RESOURCE = "/queries/wikipedia_editstream_queries.json";
   private static final String WIKIPEDIA_LOOKUP_RESOURCE = "/queries/wiki-lookup-config.json";
@@ -65,7 +64,6 @@ public class ITWikipediaQueryTest
   @BeforeMethod
   public void before() throws Exception
   {
-
     // ensure that wikipedia segments are loaded completely
     ITRetryUtil.retryUntilTrue(
         () -> coordinatorClient.areSegmentsLoaded(WIKIPEDIA_DATA_SOURCE), "wikipedia segment load"
@@ -81,7 +79,7 @@ public class ITWikipediaQueryTest
   @Test
   public void testWikipediaQueriesFromFile() throws Exception
   {
-    queryHelper.testQueriesFromFile(WIKIPEDIA_QUERIES_RESOURCE, 2);
+    queryHelper.testQueriesFromFile(WIKIPEDIA_QUERIES_RESOURCE);
   }
 
   @Test
@@ -110,7 +108,7 @@ public class ITWikipediaQueryTest
       StatusResponseHolder status = future.get();
       if (status.getStatus().getCode() == QueryCapacityExceededException.STATUS_CODE) {
         limited++;
-        Assert.assertTrue(status.getContent().contains(StringUtils.format(QueryCapacityExceededException.ERROR_MESSAGE_TEMPLATE, "one")));
+        Assert.assertTrue(status.getContent().contains(QueryCapacityExceededException.makeLaneErrorMessage("one", 1)));
       } else if (status.getStatus().getCode() == HttpResponseStatus.OK.getCode()) {
         success++;
       }
@@ -125,14 +123,14 @@ public class ITWikipediaQueryTest
         getQueryBuilder().build()
     ).get();
 
-    Assert.assertEquals(HttpResponseStatus.OK.getCode(), followUp.getStatus().getCode());
+    Assert.assertEquals(followUp.getStatus().getCode(), HttpResponseStatus.OK.getCode());
 
     StatusResponseHolder andAnother = queryClient.queryAsync(
         queryHelper.getQueryURL(config.getBrokerUrl()),
         getQueryBuilder().build()
     ).get();
 
-    Assert.assertEquals(HttpResponseStatus.OK.getCode(), andAnother.getStatus().getCode());
+    Assert.assertEquals(andAnother.getStatus().getCode(), HttpResponseStatus.OK.getCode());
   }
 
   @Test

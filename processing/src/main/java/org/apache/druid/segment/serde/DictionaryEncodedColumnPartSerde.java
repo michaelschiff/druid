@@ -116,7 +116,7 @@ public class DictionaryEncodedColumnPartSerde implements ColumnPartSerde
   private DictionaryEncodedColumnPartSerde(
       ByteOrder byteOrder,
       BitmapSerdeFactory bitmapSerdeFactory,
-      Serializer serializer
+      @Nullable Serializer serializer
   )
   {
     this.byteOrder = byteOrder;
@@ -321,6 +321,8 @@ public class DictionaryEncodedColumnPartSerde implements ColumnPartSerde
           rMultiValuedColumn = null;
         }
 
+        final String firstDictionaryEntry = rDictionary.get(0);
+
         DictionaryEncodedColumnSupplier dictionaryEncodedColumnSupplier = new DictionaryEncodedColumnSupplier(
             rDictionary,
             rSingleValuedColumn,
@@ -329,6 +331,7 @@ public class DictionaryEncodedColumnPartSerde implements ColumnPartSerde
         );
         builder
             .setHasMultipleValues(hasMultipleValues)
+            .setHasNulls(firstDictionaryEntry == null)
             .setDictionaryEncodedColumnSupplier(dictionaryEncodedColumnSupplier);
 
         if (!Feature.NO_BITMAP_INDEX.isSet(rFlags)) {

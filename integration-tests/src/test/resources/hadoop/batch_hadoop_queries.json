@@ -3,7 +3,7 @@
     "description": "segmentMetadata_query",
     "query": {
       "queryType": "segmentMetadata",
-      "dataSource": "batchHadoop",
+      "dataSource": "%%DATASOURCE%%",
       "merge": "true",
       "intervals": "2014-10/2014-12"
     },
@@ -18,6 +18,7 @@
             "type": "STRING",
             "size": 0,
             "hasMultipleValues": false,
+            "hasNulls": false,
             "minValue": "location_1",
             "maxValue": "location_5",
             "cardinality": 5,
@@ -27,6 +28,7 @@
             "type": "thetaSketch",
             "size": 0,
             "hasMultipleValues": false,
+            "hasNulls": true,
             "minValue": null,
             "maxValue": null,
             "cardinality": null,
@@ -36,6 +38,7 @@
             "type": "thetaSketch",
             "size": 0,
             "hasMultipleValues": false,
+            "hasNulls": true,
             "minValue": null,
             "maxValue": null,
             "cardinality": null,
@@ -45,6 +48,7 @@
             "type": "LONG",
             "size": 0,
             "hasMultipleValues": false,
+            "hasNulls": false,
             "minValue": null,
             "maxValue": null,
             "cardinality": null,
@@ -54,6 +58,7 @@
             "type": "STRING",
             "size": 0,
             "hasMultipleValues": false,
+            "hasNulls": false,
             "minValue": "product_1",
             "maxValue": "product_9",
             "cardinality": 15,
@@ -73,7 +78,7 @@
     "description": "time_boundary_query",
     "query": {
       "queryType": "timeBoundary",
-      "dataSource": "batchHadoop"
+      "dataSource": "%%DATASOURCE%%"
     },
     "expectedResults": [
       {
@@ -90,7 +95,7 @@
     "query": {
       "queryType": "groupBy",
       "dataSource": {
-        "name": "batchHadoop",
+        "name": "%%DATASOURCE%%",
         "type": "table"
       },
       "dimensions": [],

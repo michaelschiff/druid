@@ -166,12 +166,6 @@ public class QueryableIndexStorageAdapter implements StorageAdapter
   }
 
   @Override
-  public Capabilities getCapabilities()
-  {
-    return Capabilities.builder().dimensionValuesSorted(true).build();
-  }
-
-  @Override
   @Nullable
   public ColumnCapabilities getColumnCapabilities(String column)
   {
@@ -216,17 +210,15 @@ public class QueryableIndexStorageAdapter implements StorageAdapter
   {
     if (filter != null) {
       final boolean filterCanVectorize =
-          filter.shouldUseBitmapIndex(makeBitmapIndexSelector(virtualColumns))
-          || filter.canVectorizeMatcher();
+          filter.shouldUseBitmapIndex(makeBitmapIndexSelector(virtualColumns)) || filter.canVectorizeMatcher(this);
 
       if (!filterCanVectorize) {
         return false;
       }
     }
 
-    // 1) Virtual columns can't vectorize yet
-    // 2) Vector cursors can't iterate backwards yet
-    return virtualColumns.size() == 0 && !descending;
+    // vector cursors can't iterate backwards yet
+    return !descending;
   }
 
   @Override
@@ -319,6 +311,19 @@ public class QueryableIndexStorageAdapter implements StorageAdapter
       return null;
     }
     return columnHolder.getCapabilities();
+  }
+
+  public static ColumnInspector getColumnInspectorForIndex(ColumnSelector index)
+  {
+    return new ColumnInspector()
+    {
+      @Nullable
+      @Override
+      public ColumnCapabilities getColumnCapabilities(String column)
+      {
+        return QueryableIndexStorageAdapter.getColumnCapabilities(index, column);
+      }
+    };
   }
 
   @Override
@@ -432,13 +437,13 @@ public class QueryableIndexStorageAdapter implements StorageAdapter
     }
 
     if (queryMetrics != null) {
-      queryMetrics.preFilters(preFilters);
+      queryMetrics.preFilters(new ArrayList<>(preFilters));
       queryMetrics.postFilters(postFilters);
       queryMetrics.reportSegmentRows(totalRows);
       queryMetrics.reportPreFilteredRows(preFilteredRows);
     }
 
-    return new FilterAnalysis(preFilterBitmap, Filters.and(postFilters));
+    return new FilterAnalysis(preFilterBitmap, Filters.maybeAnd(postFilters).orElse(null));
   }
 
   @VisibleForTesting

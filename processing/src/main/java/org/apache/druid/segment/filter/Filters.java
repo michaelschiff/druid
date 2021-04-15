@@ -19,20 +19,19 @@
 
 package org.apache.druid.segment.filter;
 
-import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
+import com.google.common.collect.Iterables;
 import it.unimi.dsi.fastutil.ints.IntIterable;
 import it.unimi.dsi.fastutil.ints.IntIterator;
 import it.unimi.dsi.fastutil.ints.IntList;
 import org.apache.druid.collections.bitmap.ImmutableBitmap;
-import org.apache.druid.java.util.common.guava.FunctionalIterable;
+import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.query.BitmapResultFactory;
 import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryContexts;
 import org.apache.druid.query.filter.BitmapIndexSelector;
-import org.apache.druid.query.filter.BooleanFilter;
 import org.apache.druid.query.filter.DimFilter;
 import org.apache.druid.query.filter.DruidPredicateFactory;
 import org.apache.druid.query.filter.Filter;
@@ -46,21 +45,29 @@ import org.apache.druid.segment.column.BitmapIndex;
 import org.apache.druid.segment.column.ColumnHolder;
 import org.apache.druid.segment.data.CloseableIndexed;
 import org.apache.druid.segment.data.Indexed;
+import org.apache.druid.segment.filter.cnf.CalciteCnfHelper;
+import org.apache.druid.segment.filter.cnf.HiveCnfHelper;
+import org.apache.druid.segment.join.filter.AllNullColumnSelectorFactory;
 
 import javax.annotation.Nullable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.Optional;
+import java.util.stream.Collectors;
 
 /**
  *
  */
 public class Filters
 {
-  private static final String CTX_KEY_USE_FILTER_CNF = "useFilterCNF";
+  private static final ColumnSelectorFactory ALL_NULL_COLUMN_SELECTOR_FACTORY = new AllNullColumnSelectorFactory();
 
   /**
    * Convert a list of DimFilters to a list of Filters.
@@ -71,20 +78,7 @@ public class Filters
    */
   public static List<Filter> toFilters(List<DimFilter> dimFilters)
   {
-    return ImmutableList.copyOf(
-        FunctionalIterable
-            .create(dimFilters)
-            .transform(
-                new Function<DimFilter, Filter>()
-                {
-                  @Override
-                  public Filter apply(DimFilter input)
-                  {
-                    return input.toFilter();
-                  }
-                }
-            )
-    );
+    return dimFilters.stream().map(Filters::toFilter).collect(Collectors.toList());
   }
 
   /**
@@ -97,7 +91,7 @@ public class Filters
   @Nullable
   public static Filter toFilter(@Nullable DimFilter dimFilter)
   {
-    return dimFilter == null ? null : dimFilter.toFilter();
+    return dimFilter == null ? null : dimFilter.toOptimizedFilter();
   }
 
   /**
@@ -171,7 +165,7 @@ public class Filters
    *
    * @return an iterable of bitmaps
    */
-  static Iterable<ImmutableBitmap> bitmapsFromIndexes(final IntIterable indexes, final BitmapIndex bitmapIndex)
+  public static Iterable<ImmutableBitmap> bitmapsFromIndexes(final IntIterable indexes, final BitmapIndex bitmapIndex)
   {
     // Do not use Iterables.transform() to avoid boxing/unboxing integers.
     return new Iterable<ImmutableBitmap>()
@@ -415,7 +409,7 @@ public class Filters
     };
   }
 
-  static boolean supportsSelectivityEstimation(
+  public static boolean supportsSelectivityEstimation(
       Filter filter,
       String dimension,
       ColumnSelector columnSelector,
@@ -425,7 +419,7 @@ public class Filters
     if (filter.supportsBitmapIndex(indexSelector)) {
       final ColumnHolder columnHolder = columnSelector.getColumnHolder(dimension);
       if (columnHolder != null) {
-        return !columnHolder.getCapabilities().hasMultipleValues();
+        return columnHolder.getCapabilities().hasMultipleValues().isFalse();
       }
     }
     return false;
@@ -437,172 +431,28 @@ public class Filters
     if (filter == null) {
       return null;
     }
-    boolean useCNF = query.getContextBoolean(CTX_KEY_USE_FILTER_CNF, false);
-    return useCNF ? convertToCNF(filter) : filter;
+    boolean useCNF = query.getContextBoolean(QueryContexts.USE_FILTER_CNF_KEY, QueryContexts.DEFAULT_USE_FILTER_CNF);
+    return useCNF ? Filters.toCnf(filter) : filter;
   }
 
-  public static Filter convertToCNF(Filter current)
+  public static Filter toCnf(Filter current)
   {
-    current = pushDownNot(current);
-    current = flatten(current);
-    current = convertToCNFInternal(current);
-    current = flatten(current);
+    // Push down NOT filters to leaves if possible to remove NOT on NOT filters and reduce hierarchy.
+    // ex) ~(a OR ~b) => ~a AND b
+    current = HiveCnfHelper.pushDownNot(current);
+    // Flatten nested AND and OR filters if possible.
+    // ex) a AND (b AND c) => a AND b AND c
+    current = HiveCnfHelper.flatten(current);
+    // Pull up AND filters first to convert the filter into a conjunctive form.
+    // It is important to pull before CNF conversion to not create a huge CNF.
+    // ex) (a AND b) OR (a AND c AND d) => a AND (b OR (c AND d))
+    current = CalciteCnfHelper.pull(current);
+    // Convert filter to CNF.
+    // a AND (b OR (c AND d)) => a AND (b OR c) AND (b OR d)
+    current = HiveCnfHelper.convertToCnf(current);
+    // Flatten again to remove any flattenable nested AND or OR filters created during CNF conversion.
+    current = HiveCnfHelper.flatten(current);
     return current;
-  }
-
-  // CNF conversion functions were adapted from Apache Hive, see:
-  // https://github.com/apache/hive/blob/branch-2.0/storage-api/src/java/org/apache/hadoop/hive/ql/io/sarg/SearchArgumentImpl.java
-  private static Filter pushDownNot(Filter current)
-  {
-    if (current instanceof NotFilter) {
-      Filter child = ((NotFilter) current).getBaseFilter();
-      if (child instanceof NotFilter) {
-        return pushDownNot(((NotFilter) child).getBaseFilter());
-      }
-      if (child instanceof AndFilter) {
-        List<Filter> children = new ArrayList<>();
-        for (Filter grandChild : ((AndFilter) child).getFilters()) {
-          children.add(pushDownNot(new NotFilter(grandChild)));
-        }
-        return new OrFilter(children);
-      }
-      if (child instanceof OrFilter) {
-        List<Filter> children = new ArrayList<>();
-        for (Filter grandChild : ((OrFilter) child).getFilters()) {
-          children.add(pushDownNot(new NotFilter(grandChild)));
-        }
-        return new AndFilter(children);
-      }
-    }
-
-
-    if (current instanceof AndFilter) {
-      List<Filter> children = new ArrayList<>();
-      for (Filter child : ((AndFilter) current).getFilters()) {
-        children.add(pushDownNot(child));
-      }
-      return new AndFilter(children);
-    }
-
-
-    if (current instanceof OrFilter) {
-      List<Filter> children = new ArrayList<>();
-      for (Filter child : ((OrFilter) current).getFilters()) {
-        children.add(pushDownNot(child));
-      }
-      return new OrFilter(children);
-    }
-    return current;
-  }
-
-  // CNF conversion functions were adapted from Apache Hive, see:
-  // https://github.com/apache/hive/blob/branch-2.0/storage-api/src/java/org/apache/hadoop/hive/ql/io/sarg/SearchArgumentImpl.java
-  private static Filter convertToCNFInternal(Filter current)
-  {
-    if (current instanceof NotFilter) {
-      return new NotFilter(convertToCNFInternal(((NotFilter) current).getBaseFilter()));
-    }
-    if (current instanceof AndFilter) {
-      List<Filter> children = new ArrayList<>();
-      for (Filter child : ((AndFilter) current).getFilters()) {
-        children.add(convertToCNFInternal(child));
-      }
-      return new AndFilter(children);
-    }
-    if (current instanceof OrFilter) {
-      // a list of leaves that weren't under AND expressions
-      List<Filter> nonAndList = new ArrayList<Filter>();
-      // a list of AND expressions that we need to distribute
-      List<Filter> andList = new ArrayList<Filter>();
-      for (Filter child : ((OrFilter) current).getFilters()) {
-        if (child instanceof AndFilter) {
-          andList.add(child);
-        } else if (child instanceof OrFilter) {
-          // pull apart the kids of the OR expression
-          nonAndList.addAll(((OrFilter) child).getFilters());
-        } else {
-          nonAndList.add(child);
-        }
-      }
-      if (!andList.isEmpty()) {
-        List<Filter> result = new ArrayList<>();
-        generateAllCombinations(result, andList, nonAndList);
-        return new AndFilter(result);
-      }
-    }
-    return current;
-  }
-
-  // CNF conversion functions were adapted from Apache Hive, see:
-  // https://github.com/apache/hive/blob/branch-2.0/storage-api/src/java/org/apache/hadoop/hive/ql/io/sarg/SearchArgumentImpl.java
-  private static Filter flatten(Filter root)
-  {
-    if (root instanceof BooleanFilter) {
-      List<Filter> children = new ArrayList<>(((BooleanFilter) root).getFilters());
-      // iterate through the index, so that if we add more children,
-      // they don't get re-visited
-      for (int i = 0; i < children.size(); ++i) {
-        Filter child = flatten(children.get(i));
-        // do we need to flatten?
-        if (child.getClass() == root.getClass() && !(child instanceof NotFilter)) {
-          boolean first = true;
-          List<Filter> grandKids = ((BooleanFilter) child).getFilters();
-          for (Filter grandkid : grandKids) {
-            // for the first grandkid replace the original parent
-            if (first) {
-              first = false;
-              children.set(i, grandkid);
-            } else {
-              children.add(++i, grandkid);
-            }
-          }
-        } else {
-          children.set(i, child);
-        }
-      }
-      // if we have a singleton AND or OR, just return the child
-      if (children.size() == 1 && (root instanceof AndFilter || root instanceof OrFilter)) {
-        return children.get(0);
-      }
-
-      if (root instanceof AndFilter) {
-        return new AndFilter(children);
-      } else if (root instanceof OrFilter) {
-        return new OrFilter(children);
-      }
-    }
-    return root;
-  }
-
-  // CNF conversion functions were adapted from Apache Hive, see:
-  // https://github.com/apache/hive/blob/branch-2.0/storage-api/src/java/org/apache/hadoop/hive/ql/io/sarg/SearchArgumentImpl.java
-  private static void generateAllCombinations(
-      List<Filter> result,
-      List<Filter> andList,
-      List<Filter> nonAndList
-  )
-  {
-    List<Filter> children = ((AndFilter) andList.get(0)).getFilters();
-    if (result.isEmpty()) {
-      for (Filter child : children) {
-        List<Filter> a = Lists.newArrayList(nonAndList);
-        a.add(child);
-        result.add(new OrFilter(a));
-      }
-    } else {
-      List<Filter> work = new ArrayList<>(result);
-      result.clear();
-      for (Filter child : children) {
-        for (Filter or : work) {
-          List<Filter> a = Lists.newArrayList((((OrFilter) or).getFilters()));
-          a.add(child);
-          result.add(new OrFilter(a));
-        }
-      }
-    }
-    if (andList.size() > 1) {
-      generateAllCombinations(result, andList.subList(1, andList.size()), nonAndList);
-    }
   }
 
   /**
@@ -635,25 +485,149 @@ public class Filters
   }
 
   /**
-   * Create a filter representing an AND relationship across a list of filters.
+   * Create a filter representing an AND relationship across a list of filters. Deduplicates filters, flattens stacks,
+   * and removes literal "false" filters.
    *
-   * @param filterList List of filters
+   * @param filters List of filters
    *
-   * @return If filterList has more than one element, return an AND filter composed of the filters from filterList
-   * If filterList has a single element, return that element alone
-   * If filterList is empty, return null
+   * @return If "filters" has more than one filter remaining after processing, returns {@link AndFilter}.
+   * If "filters" has a single element remaining after processing, return that filter alone.
+   *
+   * @throws IllegalArgumentException if "filters" is empty
    */
-  @Nullable
-  public static Filter and(List<Filter> filterList)
+  public static Filter and(final List<Filter> filters)
   {
-    if (filterList.isEmpty()) {
-      return null;
+    return maybeAnd(filters).orElseThrow(() -> new IAE("Expected nonempty filters list"));
+  }
+
+  /**
+   * Like {@link #and}, but returns an empty Optional instead of throwing an exception if "filters" is empty.
+   */
+  public static Optional<Filter> maybeAnd(List<Filter> filters)
+  {
+    if (filters.isEmpty()) {
+      return Optional.empty();
     }
 
-    if (filterList.size() == 1) {
-      return filterList.get(0);
+    final LinkedHashSet<Filter> filtersToUse = flattenAndChildren(filters);
+
+    if (filtersToUse.isEmpty()) {
+      assert !filters.isEmpty();
+      // Original "filters" list must have been 100% literally-true filters.
+      return Optional.of(TrueFilter.instance());
+    } else if (filtersToUse.stream().anyMatch(filter -> filter instanceof FalseFilter)) {
+      // AND of FALSE with anything is FALSE.
+      return Optional.of(FalseFilter.instance());
+    } else if (filtersToUse.size() == 1) {
+      return Optional.of(Iterables.getOnlyElement(filtersToUse));
+    } else {
+      return Optional.of(new AndFilter(filtersToUse));
+    }
+  }
+
+  /**
+   * Create a filter representing an OR relationship across a list of filters. Deduplicates filters, flattens stacks,
+   * and removes literal "false" filters.
+   *
+   * @param filters List of filters
+   *
+   * @return If "filters" has more than one filter remaining after processing, returns {@link OrFilter}.
+   * If "filters" has a single element remaining after processing, return that filter alone.
+   *
+   * @throws IllegalArgumentException if "filters" is empty
+   */
+  public static Filter or(final List<Filter> filters)
+  {
+    return maybeOr(filters).orElseThrow(() -> new IAE("Expected nonempty filters list"));
+  }
+
+  /**
+   * Like {@link #or}, but returns an empty Optional instead of throwing an exception if "filters" is empty.
+   */
+  public static Optional<Filter> maybeOr(final List<Filter> filters)
+  {
+    if (filters.isEmpty()) {
+      return Optional.empty();
     }
 
-    return new AndFilter(filterList);
+    final LinkedHashSet<Filter> filtersToUse = flattenOrChildren(filters);
+
+    if (filtersToUse.isEmpty()) {
+      assert !filters.isEmpty();
+      // Original "filters" list must have been 100% literally-false filters.
+      return Optional.of(FalseFilter.instance());
+    } else if (filtersToUse.stream().anyMatch(filter -> filter instanceof TrueFilter)) {
+      // OR of TRUE with anything is TRUE.
+      return Optional.of(TrueFilter.instance());
+    } else if (filtersToUse.size() == 1) {
+      return Optional.of(Iterables.getOnlyElement(filtersToUse));
+    } else {
+      return Optional.of(new OrFilter(filtersToUse));
+    }
+  }
+
+  /**
+   * @param filter the filter.
+   *
+   * @return The normalized or clauses for the provided filter.
+   */
+  public static List<Filter> toNormalizedOrClauses(Filter filter)
+  {
+    Filter normalizedFilter = Filters.toCnf(filter);
+
+    // List of candidates for pushdown
+    // CNF normalization will generate either
+    // - an AND filter with multiple subfilters
+    // - or a single non-AND subfilter which cannot be split further
+    List<Filter> normalizedOrClauses;
+    if (normalizedFilter instanceof AndFilter) {
+      normalizedOrClauses = new ArrayList<>(((AndFilter) normalizedFilter).getFilters());
+    } else {
+      normalizedOrClauses = Collections.singletonList(normalizedFilter);
+    }
+    return normalizedOrClauses;
+  }
+
+
+  public static boolean filterMatchesNull(Filter filter)
+  {
+    ValueMatcher valueMatcher = filter.makeMatcher(ALL_NULL_COLUMN_SELECTOR_FACTORY);
+    return valueMatcher.matches();
+  }
+
+  /**
+   * Flattens children of an AND, removes duplicates, and removes literally-true filters.
+   */
+  private static LinkedHashSet<Filter> flattenAndChildren(final Collection<Filter> filters)
+  {
+    final LinkedHashSet<Filter> retVal = new LinkedHashSet<>();
+
+    for (Filter child : filters) {
+      if (child instanceof AndFilter) {
+        retVal.addAll(flattenAndChildren(((AndFilter) child).getFilters()));
+      } else if (!(child instanceof TrueFilter)) {
+        retVal.add(child);
+      }
+    }
+
+    return retVal;
+  }
+
+  /**
+   * Flattens children of an OR, removes duplicates, and removes literally-false filters.
+   */
+  private static LinkedHashSet<Filter> flattenOrChildren(final Collection<Filter> filters)
+  {
+    final LinkedHashSet<Filter> retVal = new LinkedHashSet<>();
+
+    for (Filter child : filters) {
+      if (child instanceof OrFilter) {
+        retVal.addAll(flattenOrChildren(((OrFilter) child).getFilters()));
+      } else if (!(child instanceof FalseFilter)) {
+        retVal.add(child);
+      }
+    }
+
+    return retVal;
   }
 }

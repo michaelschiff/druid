@@ -22,19 +22,24 @@ package org.apache.druid.sql.calcite.rel;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Iterables;
 import org.apache.calcite.plan.RelOptCluster;
 import org.apache.calcite.plan.RelOptCost;
 import org.apache.calcite.plan.RelOptPlanner;
 import org.apache.calcite.plan.RelOptRule;
 import org.apache.calcite.plan.RelTraitSet;
+import org.apache.calcite.plan.volcano.RelSubset;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelWriter;
+import org.apache.calcite.rel.core.Filter;
 import org.apache.calcite.rel.core.Join;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rel.metadata.RelMetadataQuery;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.sql.SqlKind;
 import org.apache.druid.java.util.common.IAE;
+import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.Pair;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.guava.Sequence;
@@ -42,13 +47,16 @@ import org.apache.druid.query.DataSource;
 import org.apache.druid.query.JoinDataSource;
 import org.apache.druid.query.QueryDataSource;
 import org.apache.druid.query.TableDataSource;
+import org.apache.druid.query.filter.DimFilter;
 import org.apache.druid.segment.column.RowSignature;
 import org.apache.druid.segment.join.JoinType;
 import org.apache.druid.sql.calcite.expression.DruidExpression;
 import org.apache.druid.sql.calcite.expression.Expressions;
 import org.apache.druid.sql.calcite.planner.Calcites;
+import org.apache.druid.sql.calcite.planner.PlannerContext;
 import org.apache.druid.sql.calcite.table.RowSignatures;
 
+import javax.annotation.Nullable;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -60,8 +68,8 @@ import java.util.stream.Collectors;
 public class DruidJoinQueryRel extends DruidRel<DruidJoinQueryRel>
 {
   private static final TableDataSource DUMMY_DATA_SOURCE = new TableDataSource("__join__");
-  private static final double COST_FACTOR = 100.0;
 
+  private final Filter leftFilter;
   private final PartialDruidQuery partialQuery;
   private final Join joinRel;
   private RelNode left;
@@ -71,6 +79,7 @@ public class DruidJoinQueryRel extends DruidRel<DruidJoinQueryRel>
       RelOptCluster cluster,
       RelTraitSet traitSet,
       Join joinRel,
+      Filter leftFilter,
       PartialDruidQuery partialQuery,
       QueryMaker queryMaker
   )
@@ -79,15 +88,24 @@ public class DruidJoinQueryRel extends DruidRel<DruidJoinQueryRel>
     this.joinRel = joinRel;
     this.left = joinRel.getLeft();
     this.right = joinRel.getRight();
+    this.leftFilter = leftFilter;
     this.partialQuery = partialQuery;
   }
 
-  public static DruidJoinQueryRel create(final Join joinRel, final QueryMaker queryMaker)
+  /**
+   * Create an instance from a Join that is based on two {@link DruidRel} inputs.
+   */
+  public static DruidJoinQueryRel create(
+      final Join joinRel,
+      final Filter leftFilter,
+      final QueryMaker queryMaker
+  )
   {
     return new DruidJoinQueryRel(
         joinRel.getCluster(),
         joinRel.getTraitSet(),
         joinRel,
+        leftFilter,
         PartialDruidQuery.create(joinRel),
         queryMaker
     );
@@ -117,15 +135,10 @@ public class DruidJoinQueryRel extends DruidRel<DruidJoinQueryRel>
         getCluster(),
         getTraitSet().plusAll(newQueryBuilder.getRelTraits()),
         joinRel,
+        leftFilter,
         newQueryBuilder,
         getQueryMaker()
     );
-  }
-
-  @Override
-  public int getQueryCount()
-  {
-    return ((DruidRel<?>) left).getQueryCount() + ((DruidRel<?>) right).getQueryCount();
   }
 
   @Override
@@ -141,18 +154,19 @@ public class DruidJoinQueryRel extends DruidRel<DruidJoinQueryRel>
     final RowSignature rightSignature = rightQuery.getOutputRowSignature();
     final DataSource rightDataSource;
 
-    // Left rel: allow direct embedding of scans/mappings including those of joins.
-    if (DruidRels.isScanOrMapping(leftDruidRel, true)) {
-      leftDataSource = leftQuery.getDataSource();
-    } else {
+    if (computeLeftRequiresSubquery(leftDruidRel)) {
       leftDataSource = new QueryDataSource(leftQuery.getQuery());
+      if (leftFilter != null) {
+        throw new ISE("Filter on left table is supposed to be null if left child is a query source");
+      }
+    } else {
+      leftDataSource = leftQuery.getDataSource();
     }
 
-    // Right rel: allow direct embedding of scans/mappings, excluding joins (those must be done as subqueries).
-    if (DruidRels.isScanOrMapping(rightDruidRel, false)) {
-      rightDataSource = rightQuery.getDataSource();
-    } else {
+    if (computeRightRequiresSubquery(rightDruidRel)) {
       rightDataSource = new QueryDataSource(rightQuery.getQuery());
+    } else {
+      rightDataSource = rightQuery.getDataSource();
     }
 
     final Pair<String, RowSignature> prefixSignaturePair = computeJoinRowSignature(leftSignature, rightSignature);
@@ -177,6 +191,7 @@ public class DruidJoinQueryRel extends DruidRel<DruidJoinQueryRel>
             prefixSignaturePair.lhs,
             condition.getExpression(),
             toDruidJoinType(joinRel.getJoinType()),
+            getDimFilter(getPlannerContext(), leftSignature, leftFilter),
             getPlannerContext().getExprMacroTable()
         ),
         prefixSignaturePair.rhs,
@@ -214,6 +229,7 @@ public class DruidJoinQueryRel extends DruidRel<DruidJoinQueryRel>
                    .map(input -> RelOptRule.convert(input, DruidConvention.instance()))
                    .collect(Collectors.toList())
         ),
+        leftFilter,
         partialQuery,
         getQueryMaker()
     );
@@ -252,6 +268,7 @@ public class DruidJoinQueryRel extends DruidRel<DruidJoinQueryRel>
         getCluster(),
         traitSet,
         joinRel.copy(joinRel.getTraitSet(), inputs),
+        leftFilter,
         getPartialDruidQuery(),
         getQueryMaker()
     );
@@ -279,12 +296,9 @@ public class DruidJoinQueryRel extends DruidRel<DruidJoinQueryRel>
       throw new RuntimeException(e);
     }
 
-    return pw.input("left", left)
-             .input("right", right)
-             .item("condition", joinRel.getCondition())
-             .item("joinType", joinRel.getJoinType())
-             .item("query", queryString)
-             .item("signature", druidQuery.getOutputRowSignature());
+    return joinRel.explainTerms(pw)
+                  .item("query", queryString)
+                  .item("signature", druidQuery.getOutputRowSignature());
   }
 
   @Override
@@ -296,13 +310,26 @@ public class DruidJoinQueryRel extends DruidRel<DruidJoinQueryRel>
   @Override
   public RelOptCost computeSelfCost(final RelOptPlanner planner, final RelMetadataQuery mq)
   {
-    return planner.getCostFactory()
-                  .makeCost(mq.getRowCount(left), 0, 0)
-                  .plus(planner.getCostFactory().makeCost(mq.getRowCount(right), 0, 0))
-                  .multiplyBy(COST_FACTOR);
+    double cost;
+
+    if (computeLeftRequiresSubquery(getSomeDruidChild(left))) {
+      cost = CostEstimates.COST_JOIN_SUBQUERY;
+    } else {
+      cost = partialQuery.estimateCost();
+    }
+
+    if (computeRightRequiresSubquery(getSomeDruidChild(right))) {
+      cost += CostEstimates.COST_JOIN_SUBQUERY;
+    }
+
+    if (joinRel.getCondition().isA(SqlKind.LITERAL) && !joinRel.getCondition().isAlwaysFalse()) {
+      cost += CostEstimates.COST_JOIN_CROSS;
+    }
+
+    return planner.getCostFactory().makeCost(cost, 0, 0);
   }
 
-  private static JoinType toDruidJoinType(JoinRelType calciteJoinType)
+  public static JoinType toDruidJoinType(JoinRelType calciteJoinType)
   {
     switch (calciteJoinType) {
       case LEFT:
@@ -316,6 +343,21 @@ public class DruidJoinQueryRel extends DruidRel<DruidJoinQueryRel>
       default:
         throw new IAE("Cannot handle joinType[%s]", calciteJoinType);
     }
+  }
+
+  private static boolean computeLeftRequiresSubquery(final DruidRel<?> left)
+  {
+    // Left requires a subquery unless it's a scan or mapping on top of any table or a join.
+    return !DruidRels.isScanOrMapping(left, true);
+  }
+
+  private static boolean computeRightRequiresSubquery(final DruidRel<?> right)
+  {
+    // Right requires a subquery unless it's a scan or mapping on top of a global datasource.
+    // ideally this would involve JoinableFactory.isDirectlyJoinable to check that the global datasources
+    // are in fact possibly joinable, but for now isGlobal is coupled to joinability
+    return !(DruidRels.isScanOrMapping(right, false)
+             && DruidRels.druidTableIfLeafRel(right).filter(table -> table.getDataSource().isGlobal()).isPresent());
   }
 
   /**
@@ -341,5 +383,39 @@ public class DruidJoinQueryRel extends DruidRel<DruidJoinQueryRel>
     }
 
     return Pair.of(rightPrefix, signatureBuilder.build());
+  }
+
+  private static DruidRel<?> getSomeDruidChild(final RelNode child)
+  {
+    if (child instanceof DruidRel) {
+      return (DruidRel<?>) child;
+    } else {
+      final RelSubset subset = (RelSubset) child;
+      return (DruidRel<?>) Iterables.getFirst(subset.getRels(), null);
+    }
+  }
+
+  @Nullable
+  private static DimFilter getDimFilter(
+      final PlannerContext plannerContext,
+      final RowSignature rowSignature,
+      @Nullable final Filter filter
+  )
+  {
+    if (filter == null) {
+      return null;
+    }
+    final RexNode condition = filter.getCondition();
+    final DimFilter dimFilter = Expressions.toFilter(
+        plannerContext,
+        rowSignature,
+        null,
+        condition
+    );
+    if (dimFilter == null) {
+      throw new CannotBuildQueryException(filter, condition);
+    } else {
+      return dimFilter;
+    }
   }
 }

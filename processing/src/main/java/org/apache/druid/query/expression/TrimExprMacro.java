@@ -19,15 +19,20 @@
 
 package org.apache.druid.query.expression;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableSet;
 import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.math.expr.Expr;
 import org.apache.druid.math.expr.ExprEval;
 import org.apache.druid.math.expr.ExprMacroTable;
+import org.apache.druid.math.expr.ExprType;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 
 public abstract class TrimExprMacro implements ExprMacroTable.ExprMacro
 {
@@ -101,7 +106,8 @@ public abstract class TrimExprMacro implements ExprMacroTable.ExprMacro
     }
   }
 
-  private static class TrimStaticCharsExpr extends ExprMacroTable.BaseScalarUnivariateMacroFunctionExpr
+  @VisibleForTesting
+  static class TrimStaticCharsExpr extends ExprMacroTable.BaseScalarUnivariateMacroFunctionExpr
   {
     private final TrimMode mode;
     private final char[] chars;
@@ -164,6 +170,13 @@ public abstract class TrimExprMacro implements ExprMacroTable.ExprMacro
       return shuttle.visit(new TrimStaticCharsExpr(mode, newStringExpr, chars, charsExpr));
     }
 
+    @Nullable
+    @Override
+    public ExprType getOutputType(InputBindingInspector inspector)
+    {
+      return ExprType.STRING;
+    }
+
     @Override
     public String stringify()
     {
@@ -172,9 +185,36 @@ public abstract class TrimExprMacro implements ExprMacroTable.ExprMacro
       }
       return super.stringify();
     }
+
+    @Override
+    public boolean equals(Object o)
+    {
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+      if (!super.equals(o)) {
+        return false;
+      }
+      TrimStaticCharsExpr that = (TrimStaticCharsExpr) o;
+      return mode == that.mode &&
+             Arrays.equals(chars, that.chars) &&
+             Objects.equals(charsExpr, that.charsExpr);
+    }
+
+    @Override
+    public int hashCode()
+    {
+      int result = Objects.hash(super.hashCode(), mode, charsExpr);
+      result = 31 * result + Arrays.hashCode(chars);
+      return result;
+    }
   }
 
-  private static class TrimDynamicCharsExpr implements Expr
+  @VisibleForTesting
+  static class TrimDynamicCharsExpr implements Expr
   {
     private final TrimMode mode;
     private final Expr stringExpr;
@@ -243,14 +283,6 @@ public abstract class TrimExprMacro implements ExprMacroTable.ExprMacro
     }
 
     @Override
-    public void visit(final Visitor visitor)
-    {
-      stringExpr.visit(visitor);
-      charsExpr.visit(visitor);
-      visitor.visit(this);
-    }
-
-    @Override
     public Expr visit(Shuttle shuttle)
     {
       Expr newStringExpr = stringExpr.visit(shuttle);
@@ -259,11 +291,39 @@ public abstract class TrimExprMacro implements ExprMacroTable.ExprMacro
     }
 
     @Override
-    public BindingDetails analyzeInputs()
+    public BindingAnalysis analyzeInputs()
     {
       return stringExpr.analyzeInputs()
                        .with(charsExpr)
                        .withScalarArguments(ImmutableSet.of(stringExpr, charsExpr));
+    }
+
+    @Nullable
+    @Override
+    public ExprType getOutputType(InputBindingInspector inspector)
+    {
+      return ExprType.STRING;
+    }
+
+    @Override
+    public boolean equals(Object o)
+    {
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+      TrimDynamicCharsExpr that = (TrimDynamicCharsExpr) o;
+      return mode == that.mode &&
+             Objects.equals(stringExpr, that.stringExpr) &&
+             Objects.equals(charsExpr, that.charsExpr);
+    }
+
+    @Override
+    public int hashCode()
+    {
+      return Objects.hash(mode, stringExpr, charsExpr);
     }
   }
 

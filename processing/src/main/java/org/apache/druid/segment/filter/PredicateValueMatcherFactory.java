@@ -86,9 +86,27 @@ public class PredicateValueMatcherFactory implements ColumnProcessorFactory<Valu
   @Override
   public ValueMatcher makeComplexProcessor(BaseObjectColumnValueSelector<?> selector)
   {
-    if (selector instanceof NilColumnValueSelector || !mayBeFilterable(selector.classOfObject())) {
+    if (selector instanceof NilColumnValueSelector) {
       // Column does not exist, or is unfilterable. Treat it as all nulls.
       return BooleanValueMatcher.of(predicateFactory.makeStringPredicate().apply(null));
+    } else if (!isNumberOrString(selector.classOfObject())) {
+      // if column is definitely not a number of string, use the object predicate
+      final Predicate<Object> predicate = predicateFactory.makeObjectPredicate();
+      return new ValueMatcher()
+      {
+        @Override
+        public boolean matches()
+        {
+          return predicate.apply(selector.getObject());
+        }
+
+        @Override
+        public void inspectRuntimeShape(RuntimeShapeInspector inspector)
+        {
+          inspector.visit("selector", selector);
+          inspector.visit("predicate", predicate);
+        }
+      };
     } else {
       // Column exists but the type of value is unknown (we might have got here because "defaultType" is COMPLEX).
       // Return a ValueMatcher that inspects the object and does type-based comparison.
@@ -116,11 +134,13 @@ public class PredicateValueMatcherFactory implements ColumnProcessorFactory<Valu
           } else if (rowValue instanceof Number) {
             // Double or some other non-int, non-long, non-float number.
             return getDoublePredicate().applyDouble((double) rowValue);
-          } else if (rowValue instanceof String || rowValue instanceof List) {
-            // String or list-of-something. Cast to list of strings and evaluate them as strings.
+          } else {
+            // Other types. Cast to list of strings and evaluate them as strings.
+            // Boolean values are handled here as well since it is not a known type in Druid.
             final List<String> rowValueStrings = Rows.objectToStrings(rowValue);
 
             if (rowValueStrings.isEmpty()) {
+              // Empty list is equivalent to null.
               return getStringPredicate().apply(null);
             }
 
@@ -131,9 +151,6 @@ public class PredicateValueMatcherFactory implements ColumnProcessorFactory<Valu
             }
 
             return false;
-          } else {
-            // Unfilterable type. Treat as null.
-            return getStringPredicate().apply(null);
           }
         }
 
@@ -141,7 +158,7 @@ public class PredicateValueMatcherFactory implements ColumnProcessorFactory<Valu
         public void inspectRuntimeShape(RuntimeShapeInspector inspector)
         {
           inspector.visit("selector", selector);
-          inspector.visit("value", predicateFactory);
+          inspector.visit("factory", predicateFactory);
         }
 
         private Predicate<String> getStringPredicate()
@@ -189,7 +206,7 @@ public class PredicateValueMatcherFactory implements ColumnProcessorFactory<Valu
    *
    * @param clazz class of object
    */
-  private static <T> boolean mayBeFilterable(final Class<T> clazz)
+  private static <T> boolean isNumberOrString(final Class<T> clazz)
   {
     if (Number.class.isAssignableFrom(clazz) || String.class.isAssignableFrom(clazz)) {
       // clazz is a Number or String.

@@ -32,11 +32,11 @@ Before beginning the quickstart, it is helpful to read the [general Druid overvi
 
 ## Getting started
 
-The Druid source code contains [an example `docker-compose.yml`](https://github.com/apache/druid/blob/master/distribution/docker/docker-compose.yml) which can pull an image from Docker Hub and is suited to be used as an example environment and to experiment with Docker based Druid configuration and deployments.
+The Druid source code contains [an example `docker-compose.yml`](https://github.com/apache/druid/blob/{{DRUIDVERSION}}/distribution/docker/docker-compose.yml) which can pull an image from Docker Hub and is suited to be used as an example environment and to experiment with Docker based Druid configuration and deployments.
 
 ### Compose file
 
-The example `docker-compose.yml` will create a container for each Druid service, as well as Zookeeper and a PostgreSQL container as the metadata store. Deep storage will be a local directory, by default configured as `./storage` relative to your `docker-compose.yml` file, and will be mounted as `/opt/data` and shared between Druid containers which require access to deep storage. The Druid containers are configured via an [environment file](https://github.com/apache/druid/blob/master/distribution/docker/environment).
+The example `docker-compose.yml` will create a container for each Druid service, as well as Zookeeper and a PostgreSQL container as the metadata store. Deep storage will be a local directory, by default configured as `./storage` relative to your `docker-compose.yml` file, and will be mounted as `/opt/data` and shared between Druid containers which require access to deep storage. The Druid containers are configured via an [environment file](https://github.com/apache/druid/blob/{{DRUIDVERSION}}/distribution/docker/environment).
 
 ### Configuration
 
@@ -77,4 +77,7 @@ The [Druid router process](../design/router.md), which serves the [Druid console
 
 It takes a few seconds for all the Druid processes to fully start up. If you open the console immediately after starting the services, you may see some errors that you can safely ignore.
 
-From here you can follow along with the [standard tutorials](./index.md#loading-data), or elaborate on your `docker-compose.yml` to add any additional external service dependencies as necessary.
+From here you can follow along with the [Quickstart](./index.md#step-4-load-data), or elaborate on your `docker-compose.yml` to add any additional external service dependencies as necessary.
+
+## Docker Memory Requirements
+If you experience any processes crashing with a 137 error code you likely don't have enough memory allocated to Docker. 6 GB may be a good place to start. 

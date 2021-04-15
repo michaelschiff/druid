@@ -26,10 +26,10 @@ import org.apache.druid.java.util.common.Intervals;
 import org.apache.druid.java.util.common.MapUtils;
 import org.apache.druid.query.TableDataSource;
 import org.apache.druid.query.planning.DataSourceAnalysis;
-import org.apache.druid.segment.AbstractSegment;
 import org.apache.druid.segment.QueryableIndex;
 import org.apache.druid.segment.ReferenceCountingSegment;
 import org.apache.druid.segment.Segment;
+import org.apache.druid.segment.SegmentLazyLoadFailCallback;
 import org.apache.druid.segment.StorageAdapter;
 import org.apache.druid.segment.loading.SegmentLoader;
 import org.apache.druid.segment.loading.SegmentLoadingException;
@@ -52,6 +52,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -69,7 +70,7 @@ public class SegmentManagerTest
     }
 
     @Override
-    public Segment getSegment(final DataSegment segment, boolean lazy)
+    public Segment getSegment(final DataSegment segment, boolean lazy, SegmentLazyLoadFailCallback loadFailed)
     {
       return new SegmentForTesting(
           MapUtils.getString(segment.getLoadSpec(), "version"),
@@ -90,7 +91,7 @@ public class SegmentManagerTest
     }
   };
 
-  private static class SegmentForTesting extends AbstractSegment
+  private static class SegmentForTesting implements Segment
   {
     private final String version;
     private final Interval interval;
@@ -222,7 +223,7 @@ public class SegmentManagerTest
     final List<Future<Boolean>> futures = SEGMENTS.stream()
                                                   .map(
                                                       segment -> executor.submit(
-                                                          () -> segmentManager.loadSegment(segment, false)
+                                                          () -> segmentManager.loadSegment(segment, false, SegmentLazyLoadFailCallback.NOOP)
                                                       )
                                                   )
                                                   .collect(Collectors.toList());
@@ -238,7 +239,7 @@ public class SegmentManagerTest
   public void testDropSegment() throws SegmentLoadingException, ExecutionException, InterruptedException
   {
     for (DataSegment eachSegment : SEGMENTS) {
-      Assert.assertTrue(segmentManager.loadSegment(eachSegment, false));
+      Assert.assertTrue(segmentManager.loadSegment(eachSegment, false, SegmentLazyLoadFailCallback.NOOP));
     }
 
     final List<Future<Void>> futures = ImmutableList.of(SEGMENTS.get(0), SEGMENTS.get(2)).stream()
@@ -264,14 +265,14 @@ public class SegmentManagerTest
   @Test
   public void testLoadDropSegment() throws SegmentLoadingException, ExecutionException, InterruptedException
   {
-    Assert.assertTrue(segmentManager.loadSegment(SEGMENTS.get(0), false));
-    Assert.assertTrue(segmentManager.loadSegment(SEGMENTS.get(2), false));
+    Assert.assertTrue(segmentManager.loadSegment(SEGMENTS.get(0), false, SegmentLazyLoadFailCallback.NOOP));
+    Assert.assertTrue(segmentManager.loadSegment(SEGMENTS.get(2), false, SegmentLazyLoadFailCallback.NOOP));
 
     final List<Future<Boolean>> loadFutures = ImmutableList.of(SEGMENTS.get(1), SEGMENTS.get(3), SEGMENTS.get(4))
                                                            .stream()
                                                            .map(
                                                                segment -> executor.submit(
-                                                                   () -> segmentManager.loadSegment(segment, false)
+                                                                   () -> segmentManager.loadSegment(segment, false, SegmentLazyLoadFailCallback.NOOP)
                                                                )
                                                            )
                                                            .collect(Collectors.toList());
@@ -302,10 +303,10 @@ public class SegmentManagerTest
   public void testLoadDuplicatedSegmentsSequentially() throws SegmentLoadingException
   {
     for (DataSegment segment : SEGMENTS) {
-      Assert.assertTrue(segmentManager.loadSegment(segment, false));
+      Assert.assertTrue(segmentManager.loadSegment(segment, false, SegmentLazyLoadFailCallback.NOOP));
     }
     // try to load an existing segment
-    Assert.assertFalse(segmentManager.loadSegment(SEGMENTS.get(0), false));
+    Assert.assertFalse(segmentManager.loadSegment(SEGMENTS.get(0), false, SegmentLazyLoadFailCallback.NOOP));
 
     assertResult(SEGMENTS);
   }
@@ -318,7 +319,7 @@ public class SegmentManagerTest
                                                        .stream()
                                                        .map(
                                                            segment -> executor.submit(
-                                                               () -> segmentManager.loadSegment(segment, false)
+                                                               () -> segmentManager.loadSegment(segment, false, SegmentLazyLoadFailCallback.NOOP)
                                                            )
                                                        )
                                                        .collect(Collectors.toList());
@@ -339,7 +340,7 @@ public class SegmentManagerTest
   @Test
   public void testNonExistingSegmentsSequentially() throws SegmentLoadingException
   {
-    Assert.assertTrue(segmentManager.loadSegment(SEGMENTS.get(0), false));
+    Assert.assertTrue(segmentManager.loadSegment(SEGMENTS.get(0), false, SegmentLazyLoadFailCallback.NOOP));
 
     // try to drop a non-existing segment of different data source
     segmentManager.dropSegment(SEGMENTS.get(2));
@@ -352,7 +353,7 @@ public class SegmentManagerTest
   public void testNonExistingSegmentsInParallel()
       throws SegmentLoadingException, ExecutionException, InterruptedException
   {
-    segmentManager.loadSegment(SEGMENTS.get(0), false);
+    segmentManager.loadSegment(SEGMENTS.get(0), false, SegmentLazyLoadFailCallback.NOOP);
     final List<Future<Void>> futures = ImmutableList.of(SEGMENTS.get(1), SEGMENTS.get(2))
                                                     .stream()
                                                     .map(
@@ -375,7 +376,7 @@ public class SegmentManagerTest
   @Test
   public void testRemoveEmptyTimeline() throws SegmentLoadingException
   {
-    segmentManager.loadSegment(SEGMENTS.get(0), false);
+    segmentManager.loadSegment(SEGMENTS.get(0), false, SegmentLazyLoadFailCallback.NOOP);
     assertResult(ImmutableList.of(SEGMENTS.get(0)));
     Assert.assertEquals(1, segmentManager.getDataSources().size());
     segmentManager.dropSegment(SEGMENTS.get(0));
@@ -412,7 +413,7 @@ public class SegmentManagerTest
         10
     );
 
-    segmentManager.loadSegment(segment, false);
+    segmentManager.loadSegment(segment, false, SegmentLazyLoadFailCallback.NOOP);
     assertResult(ImmutableList.of(segment));
 
     segmentManager.dropSegment(segment);
@@ -422,17 +423,19 @@ public class SegmentManagerTest
   @SuppressWarnings("RedundantThrows") // TODO remove when the bug in intelliJ is fixed.
   private void assertResult(List<DataSegment> expectedExistingSegments) throws SegmentLoadingException
   {
-    final Map<String, Long> expectedDataSourceSizes = expectedExistingSegments
-        .stream()
-        .collect(Collectors.toMap(DataSegment::getDataSource, DataSegment::getSize, Long::sum));
-    final Map<String, Long> expectedDataSourceCounts = expectedExistingSegments
-        .stream()
-        .collect(Collectors.toMap(DataSegment::getDataSource, segment -> 1L, Long::sum));
-    final Map<String, VersionedIntervalTimeline<String, ReferenceCountingSegment>> expectedDataSources
-        = new HashMap<>();
+    final Map<String, Long> expectedDataSourceSizes =
+        expectedExistingSegments.stream()
+                                .collect(Collectors.toMap(DataSegment::getDataSource, DataSegment::getSize, Long::sum));
+    final Map<String, Long> expectedDataSourceCounts =
+        expectedExistingSegments.stream()
+                                .collect(Collectors.toMap(DataSegment::getDataSource, segment -> 1L, Long::sum));
+    final Set<String> expectedDataSourceNames = expectedExistingSegments.stream()
+                                                                        .map(DataSegment::getDataSource)
+                                                                        .collect(Collectors.toSet());
+    final Map<String, VersionedIntervalTimeline<String, ReferenceCountingSegment>> expectedTimelines = new HashMap<>();
     for (DataSegment segment : expectedExistingSegments) {
       final VersionedIntervalTimeline<String, ReferenceCountingSegment> expectedTimeline =
-          expectedDataSources.computeIfAbsent(
+          expectedTimelines.computeIfAbsent(
               segment.getDataSource(),
               k -> new VersionedIntervalTimeline<>(Ordering.natural())
           );
@@ -440,16 +443,17 @@ public class SegmentManagerTest
           segment.getInterval(),
           segment.getVersion(),
           segment.getShardSpec().createChunk(
-              ReferenceCountingSegment.wrapSegment(SEGMENT_LOADER.getSegment(segment, false), segment.getShardSpec())
+              ReferenceCountingSegment.wrapSegment(SEGMENT_LOADER.getSegment(segment, false, SegmentLazyLoadFailCallback.NOOP), segment.getShardSpec())
           )
       );
     }
 
+    Assert.assertEquals(expectedDataSourceNames, segmentManager.getDataSourceNames());
     Assert.assertEquals(expectedDataSourceCounts, segmentManager.getDataSourceCounts());
     Assert.assertEquals(expectedDataSourceSizes, segmentManager.getDataSourceSizes());
 
     final Map<String, DataSourceState> dataSources = segmentManager.getDataSources();
-    Assert.assertEquals(expectedDataSources.size(), dataSources.size());
+    Assert.assertEquals(expectedTimelines.size(), dataSources.size());
 
     dataSources.forEach(
         (sourceName, dataSourceState) -> {
@@ -459,7 +463,7 @@ public class SegmentManagerTest
               dataSourceState.getTotalSegmentSize()
           );
           Assert.assertEquals(
-              expectedDataSources.get(sourceName).getAllTimelineEntries(),
+              expectedTimelines.get(sourceName).getAllTimelineEntries(),
               dataSourceState.getTimeline().getAllTimelineEntries()
           );
         }

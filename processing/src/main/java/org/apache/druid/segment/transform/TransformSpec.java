@@ -22,7 +22,6 @@ package org.apache.druid.segment.transform;
 import com.fasterxml.jackson.annotation.JsonCreator;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.common.collect.ImmutableList;
-import org.apache.druid.data.input.InputEntityReader;
 import org.apache.druid.data.input.InputSourceReader;
 import org.apache.druid.data.input.impl.InputRowParser;
 import org.apache.druid.data.input.impl.StringInputRowParser;
@@ -118,11 +117,6 @@ public class TransformSpec
     return new TransformingInputSourceReader(reader, toTransformer());
   }
 
-  public InputEntityReader decorate(InputEntityReader reader)
-  {
-    return new TransformingInputEntityReader(reader, toTransformer());
-  }
-
   /**
    * Create a {@link Transformer} from this TransformSpec, when the rows to be transformed do not have a known
    * signature.
@@ -130,6 +124,21 @@ public class TransformSpec
   public Transformer toTransformer()
   {
     return new Transformer(this);
+  }
+
+  public Set<String> getRequiredColumns()
+  {
+    final Set<String> requiredColumns = new HashSet<>();
+
+    if (filter != null) {
+      requiredColumns.addAll(filter.getRequiredColumns());
+    }
+
+    for (Transform transform : transforms) {
+      requiredColumns.addAll(transform.getRequiredColumns());
+    }
+
+    return requiredColumns;
   }
 
   @Override

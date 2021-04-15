@@ -21,15 +21,12 @@ package org.apache.druid.indexing.common.task;
 
 import com.google.common.base.Preconditions;
 import org.apache.druid.indexing.common.LockGranularity;
-import org.apache.druid.indexing.common.SegmentLock;
 import org.apache.druid.indexing.common.TaskLockType;
-import org.apache.druid.indexing.common.actions.SegmentLockReleaseAction;
 import org.apache.druid.indexing.common.actions.SegmentLockTryAcquireAction;
 import org.apache.druid.indexing.common.actions.TaskActionClient;
 import org.apache.druid.indexing.overlord.LockResult;
 import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.granularity.Granularity;
-import org.apache.druid.java.util.common.io.Closer;
 import org.apache.druid.segment.SegmentUtils;
 import org.apache.druid.timeline.DataSegment;
 import org.joda.time.Interval;
@@ -51,7 +48,7 @@ import java.util.stream.Collectors;
  * - {@link #verifyAndLockExistingSegments} is to verify the granularity of existing segments and lock them.
  *   This method must be called before the task starts indexing.
  * - Tells the task what {@link LockGranularity} it should use. Note that the LockGranularity is determined in
- *   {@link AbstractBatchIndexTask#determineLockGranularityandTryLock}.
+ *   {@link AbstractBatchIndexTask#determineLockGranularityAndTryLock}.
  * - Provides some util methods for {@link LockGranularity#SEGMENT}. Also caches the information of locked segments when
  *   - the SEGMENt lock granularity is used.
  */
@@ -182,8 +179,7 @@ public class TaskLockHelper
 
   private boolean tryLockSegments(TaskActionClient actionClient, List<DataSegment> segments) throws IOException
   {
-    final Map<Interval, List<DataSegment>> intervalToSegments = groupSegmentsByInterval(segments);
-    final Closer lockCloserOnError = Closer.create();
+    final Map<Interval, List<DataSegment>> intervalToSegments = SegmentUtils.groupSegmentsByInterval(segments);
     for (Entry<Interval, List<DataSegment>> entry : intervalToSegments.entrySet()) {
       final Interval interval = entry.getKey();
       final List<DataSegment> segmentsInInterval = entry.getValue();
@@ -206,14 +202,7 @@ public class TaskLockHelper
           )
       );
 
-      lockResults.stream()
-                 .filter(LockResult::isOk)
-                 .map(result -> (SegmentLock) result.getTaskLock())
-                 .forEach(segmentLock -> lockCloserOnError.register(() -> actionClient.submit(
-                     new SegmentLockReleaseAction(segmentLock.getInterval(), segmentLock.getPartitionId())
-                 )));
       if (lockResults.stream().anyMatch(result -> !result.isOk())) {
-        lockCloserOnError.close();
         return false;
       }
       lockedExistingSegments.addAll(segmentsInInterval);
@@ -303,14 +292,5 @@ public class TaskLockHelper
     if (atomicUpdateGroupSize != sortedSegments.get(sortedSegments.size() - 1).getAtomicUpdateGroupSize()) {
       throw new ISE("All atomicUpdateGroup must be compacted together");
     }
-  }
-
-  private static Map<Interval, List<DataSegment>> groupSegmentsByInterval(List<DataSegment> segments)
-  {
-    final Map<Interval, List<DataSegment>> map = new HashMap<>();
-    for (DataSegment segment : segments) {
-      map.computeIfAbsent(segment.getInterval(), k -> new ArrayList<>()).add(segment);
-    }
-    return map;
   }
 }

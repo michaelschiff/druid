@@ -90,17 +90,15 @@ Tuning the cluster so that each Historical can accept 50 queries and 10 non-quer
 
 #### Segment Cache Size
 
-`druid.server.maxSize` controls the total size of segment data that can be assigned by the Coordinator to a Historical.
-
-`druid.segmentCache.locations` specifies locations where segment data can be stored on the Historical. The sum of available disk space across these locations should equal `druid.server.maxSize`.
+`druid.segmentCache.locations` specifies locations where segment data can be stored on the Historical. The sum of available disk space across these locations is set as the default value for property: `druid.server.maxSize`, which controls the total size of segment data that can be assigned by the Coordinator to a Historical.
 
 Segments are memory-mapped by Historical processes using any available free system memory (i.e., memory not used by the Historical JVM and heap/direct memory buffers or other processes on the system). Segments that are not currently in memory will be paged from disk when queried.
 
-Therefore, `druid.server.maxSize` should be set such that a Historical is not allocated an excessive amount of segment data. As the value of (`free system memory` / `druid.server.maxSize`) increases, a greater proportion of segments can be kept in memory, allowing for better query performance.
+Therefore, the size of cache locations set within `druid.segmentCache.locations` should be such that a Historical is not allocated an excessive amount of segment data. As the value of (`free system memory` / total size of all `druid.segmentCache.locations`) increases, a greater proportion of segments can be kept in memory, allowing for better query performance. The total segment data size assigned to a Historical can be overridden with `druid.server.maxSize`, but this is not required for most of the use cases.
 
 #### Number of Historicals
 
-The number of Historicals needed in a cluster depends on how much data the cluster has. For good performance, you will want enough Historicals such that each Historical has a good (`free system memory` / `druid.server.maxSize`) ratio, as described in the segment cache size section above.
+The number of Historicals needed in a cluster depends on how much data the cluster has. For good performance, you will want enough Historicals such that each Historical has a good (`free system memory` / total size of all `druid.segmentCache.locations`) ratio, as described in the segment cache size section above.
 
 Having a smaller number of big servers is generally better than having a large number of small servers, as long as you have enough fault tolerance for your use case.
 
@@ -115,7 +113,7 @@ To estimate total memory usage of the Historical under these guidelines:
 - Heap: `(0.5GB * number of CPU cores) + (2 * total size of lookup maps) + druid.cache.sizeInBytes`
 - Direct Memory: `(druid.processing.numThreads + druid.processing.numMergeBuffers + 1) * druid.processing.buffer.sizeBytes`
 
-The Historical will use any available free system memory (i.e., memory not used by the Historical JVM and heap/direct memory buffers or other processes on the system) for memory-mapping of segments on disk. For better query performance, you will want to ensure a good (`free system memory` / `druid.server.maxSize`) ratio so that a greater proportion of segments can be kept in memory.
+The Historical will use any available free system memory (i.e., memory not used by the Historical JVM and heap/direct memory buffers or other processes on the system) for memory-mapping of segments on disk. For better query performance, you will want to ensure a good (`free system memory` / total size of all `druid.segmentCache.locations`) ratio so that a greater proportion of segments can be kept in memory.
 
 #### Segment sizes matter
 
@@ -264,7 +262,7 @@ The total memory usage of the MiddleManager + Tasks:
 If you use the [Kafka Indexing Service](../development/extensions-core/kafka-ingestion.md) or [Kinesis Indexing Service](../development/extensions-core/kinesis-ingestion.md), the number of tasks required will depend on the number of partitions and your taskCount/replica settings.
 
 On top of those requirements, allocating more task slots in your cluster is a good idea, so that you have free task
-slots available for other tasks, such as [compaction tasks](../ingestion/data-management.md#compact).
+slots available for other tasks, such as [compaction tasks](../ingestion/compaction.md).
 
 ###### Hadoop ingestion
 
@@ -281,6 +279,23 @@ The main performance-related setting on the Coordinator is the heap size.
 The heap requirements of the Coordinator scale with the number of servers, segments, and tasks in the cluster.
 
 You can set the Coordinator heap to the same size as your Broker heap, or slightly smaller: both services have to process cluster-wide state and answer API requests about this state.
+
+#### Dynamic Configuration
+
+`percentOfSegmentsToConsiderPerMove`
+* The default value is 100. This means that the Coordinator will consider all segments when it is looking for a segment to move. The Coordinator makes a weighted choice, with segments on Servers with the least capacity being the most likely segments to be moved.
+  * This weighted selection strategy means that the segments on the servers who have the most available capacity are the least likely to be chosen.
+  * As the number of segments in the cluster increases, the probability of choosing the Nth segment to move decreases; where N is the last segment considered for moving.
+  * An admin can use this config to skip consideration of that Nth segment.
+* Instead of skipping a precise amount of segments, we skip a percentage of segments in the cluster.
+  * For example, with the value set to 25, only the first 25% of segments will be considered as a segment that can be moved. This 25% of segments will come from the servers that have the least available capacity.
+    * In this example, each time the Coordinator looks for a segment to move, it will consider 75% less segments than it did when the configuration was 100. On clusters with hundreds of thousands of segments, this can add up to meaningful coordination time savings.
+* General recommendations for this configuration:
+  * If you are not worried about the amount of time it takes your Coordinator to complete a full coordination cycle, you likely do not need to modify this config.
+  * If you are frustrated with how long the Coordinator takes to run a full coordination cycle, and you have set the Coordinator dynamic config `maxSegmentsToMove` to a value above 0 (the default is 5), setting this config to a non-default value can help shorten coordination time.
+    * The recommended starting point value is 66. It represents a meaningful decrease in the percentage of segments considered while also not being too aggressive (You will consider 1/3 fewer segments per move operation with this value).
+* The impact that modifying this config will have on your coordination time will be a function of how low you set the config value, the value for `maxSegmentsToMove` and the total number of segments in your cluster.
+  * If your cluster has a relatively small number of segments, or you choose to move few segments per coordination cycle, there may not be much savings to be had here.
 
 ### Overlord
 
@@ -389,7 +404,7 @@ Enabling process termination on out-of-memory errors is useful as well, since th
 ```
 -Duser.timezone=UTC
 -Dfile.encoding=UTF-8
--Djava.io.tmpdir=<something other than /tmp which might be mounted to volatile tmpfs file system>
+-Djava.io.tmpdir=<should not be volatile tmpfs and also has good read and write speed. Strongly recommended to avoid using NFS mount>
 -Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager
 -Dorg.jboss.logging.provider=slf4j
 -Dnet.spy.log.LoggerImpl=net.spy.memcached.compat.log.SLF4JLogger
@@ -407,14 +422,14 @@ Enabling process termination on out-of-memory errors is useful as well, since th
 -XX:+ExitOnOutOfMemoryError
 -XX:+HeapDumpOnOutOfMemoryError
 -XX:HeapDumpPath=/var/logs/druid/historical.hprof
--XX:MaxDirectMemorySize=10240g
+-XX:MaxDirectMemorySize=1g
 ```
+> Please note that the flag settings above represent sample, general guidelines only. Be careful to use values appropriate 
+for your specific scenario and be sure to test any changes in staging environments.
 
 `ExitOnOutOfMemoryError` flag is only supported starting JDK 8u92 . For older versions, `-XX:OnOutOfMemoryError='kill -9 %p'` can be used.
 
 `MaxDirectMemorySize` restricts JVM from allocating more than specified limit, by setting it to unlimited JVM restriction is lifted and OS level memory limits would still be effective. It's still important to make sure that Druid is not configured to allocate more off-heap memory than your machine has available. Important settings here include `druid.processing.numThreads`, `druid.processing.numMergeBuffers`, and `druid.processing.buffer.sizeBytes`.
-
-Please note that above flags are general guidelines only. Be cautious and feel free to change them if necessary for the specific deployment.
 
 Additionally, for large JVM heaps, here are a few Garbage Collection efficiency guidelines that have been known to help in some cases.
 
@@ -425,7 +440,7 @@ Additionally, for large JVM heaps, here are a few Garbage Collection efficiency 
 
 ### Use UTC timezone
 
-We recommend using UTC timezone for all your events and across your hosts, not just for Druid, but for all data infrastructure. This can greatly mitigate potential query problems with inconsistent timezones. To query in a non-UTC timezone see [query granularities](../querying/granularities.html#period-granularities)
+We recommend using UTC timezone for all your events and across your hosts, not just for Druid, but for all data infrastructure. This can greatly mitigate potential query problems with inconsistent timezones. To query in a non-UTC timezone see [query granularities](../querying/granularities.md#period-granularities)
 
 ### System configuration
 

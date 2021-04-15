@@ -31,7 +31,10 @@ import org.apache.druid.query.aggregation.AggregatorUtil;
 import org.apache.druid.query.aggregation.BufferAggregator;
 import org.apache.druid.query.aggregation.VectorAggregator;
 import org.apache.druid.query.cache.CacheKeyBuilder;
+import org.apache.druid.segment.ColumnInspector;
 import org.apache.druid.segment.ColumnSelectorFactory;
+import org.apache.druid.segment.column.ColumnCapabilities;
+import org.apache.druid.segment.column.ValueType;
 import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
 
 import javax.annotation.Nullable;
@@ -76,9 +79,24 @@ public class DoubleMeanAggregatorFactory extends AggregatorFactory
   }
 
   @Override
-  public String getTypeName()
+  public String getComplexTypeName()
   {
     return "doubleMean";
+  }
+
+  /**
+   * actual type is {@link DoubleMeanHolder}
+   */
+  @Override
+  public ValueType getType()
+  {
+    return ValueType.COMPLEX;
+  }
+
+  @Override
+  public ValueType getFinalizedType()
+  {
+    return ValueType.DOUBLE;
   }
 
   @Override
@@ -106,9 +124,10 @@ public class DoubleMeanAggregatorFactory extends AggregatorFactory
   }
 
   @Override
-  public boolean canVectorize()
+  public boolean canVectorize(ColumnInspector columnInspector)
   {
-    return true;
+    final ColumnCapabilities capabilities = columnInspector.getColumnCapabilities(fieldName);
+    return capabilities == null || capabilities.getType().isNumeric();
   }
 
   @Override
@@ -148,7 +167,9 @@ public class DoubleMeanAggregatorFactory extends AggregatorFactory
   @Override
   public Object deserialize(Object object)
   {
-    if (object instanceof String) {
+    if (object instanceof byte[]) {
+      return DoubleMeanHolder.fromBytes((byte[]) object);
+    } else if (object instanceof String) {
       return DoubleMeanHolder.fromBytes(StringUtils.decodeBase64(StringUtils.toUtf8((String) object)));
     } else if (object instanceof DoubleMeanHolder) {
       return object;
@@ -161,7 +182,9 @@ public class DoubleMeanAggregatorFactory extends AggregatorFactory
   @Override
   public Object finalizeComputation(@Nullable Object object)
   {
-    if (object instanceof DoubleMeanHolder) {
+    if (object instanceof byte[]) {
+      return DoubleMeanHolder.fromBytes((byte[]) object).mean();
+    } else if (object instanceof DoubleMeanHolder) {
       return ((DoubleMeanHolder) object).mean();
     } else if (object == null) {
       return null;

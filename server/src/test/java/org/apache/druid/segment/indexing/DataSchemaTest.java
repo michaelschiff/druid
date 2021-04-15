@@ -21,9 +21,12 @@ package org.apache.druid.segment.indexing;
 
 import com.fasterxml.jackson.databind.JsonMappingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.exc.ValueInstantiationException;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import org.apache.commons.text.StringEscapeUtils;
+import org.apache.druid.common.utils.IdUtilsTest;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.data.input.impl.DimensionsSpec;
 import org.apache.druid.data.input.impl.JSONParseSpec;
@@ -41,22 +44,28 @@ import org.apache.druid.query.expression.TestExprMacroTable;
 import org.apache.druid.query.filter.SelectorDimFilter;
 import org.apache.druid.segment.TestHelper;
 import org.apache.druid.segment.indexing.granularity.ArbitraryGranularitySpec;
+import org.apache.druid.segment.indexing.granularity.GranularitySpec;
 import org.apache.druid.segment.transform.ExpressionTransform;
 import org.apache.druid.segment.transform.TransformSpec;
+import org.apache.druid.testing.InitializedNullHandlingTest;
 import org.hamcrest.CoreMatchers;
 import org.junit.Assert;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
+import org.mockito.ArgumentMatchers;
+import org.mockito.Mockito;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
-public class DataSchemaTest
+public class DataSchemaTest extends InitializedNullHandlingTest
 {
   @Rule
   public ExpectedException expectedException = ExpectedException.none();
@@ -72,6 +81,7 @@ public class DataSchemaTest
                 new TimestampSpec("time", "auto", null),
                 new DimensionsSpec(DimensionsSpec.getDefaultSchemas(ImmutableList.of("dimB", "dimA")), null, null),
                 null,
+                null,
                 null
             ),
             null
@@ -79,7 +89,7 @@ public class DataSchemaTest
     );
 
     DataSchema schema = new DataSchema(
-        "test",
+        IdUtilsTest.VALID_ID_CHARS,
         parser,
         new AggregatorFactory[]{
             new DoubleSumAggregatorFactory("metric1", "col1"),
@@ -91,7 +101,7 @@ public class DataSchemaTest
     );
 
     Assert.assertEquals(
-        ImmutableSet.of("time", "col1", "col2", "metric1", "metric2"),
+        ImmutableSet.of("__time", "time", "col1", "col2", "metric1", "metric2"),
         schema.getDimensionsSpec().getDimensionExclusions()
     );
   }
@@ -109,6 +119,7 @@ public class DataSchemaTest
                     null
                 ),
                 null,
+                null,
                 null
             ),
             null
@@ -116,7 +127,7 @@ public class DataSchemaTest
     );
 
     DataSchema schema = new DataSchema(
-        "test",
+        IdUtilsTest.VALID_ID_CHARS,
         parser,
         new AggregatorFactory[]{
             new DoubleSumAggregatorFactory("metric1", "col1"),
@@ -128,7 +139,7 @@ public class DataSchemaTest
     );
 
     Assert.assertEquals(
-        ImmutableSet.of("dimC", "col1", "metric1", "metric2"),
+        ImmutableSet.of("__time", "dimC", "col1", "metric1", "metric2"),
         schema.getParser().getParseSpec().getDimensionsSpec().getDimensionExclusions()
     );
   }
@@ -146,6 +157,7 @@ public class DataSchemaTest
                     null
                 ),
                 null,
+                null,
                 null
             ),
             null
@@ -153,7 +165,7 @@ public class DataSchemaTest
     );
 
     DataSchema schema = new DataSchema(
-        "test",
+        IdUtilsTest.VALID_ID_CHARS,
         parserMap,
         new AggregatorFactory[]{
             new DoubleSumAggregatorFactory("metric1", "col1"),
@@ -204,6 +216,7 @@ public class DataSchemaTest
                     "metric1"
                 )), ImmutableList.of("dimC"), null),
                 null,
+                null,
                 null
             ),
             null
@@ -211,7 +224,7 @@ public class DataSchemaTest
     );
 
     DataSchema schema = new DataSchema(
-        "test",
+        IdUtilsTest.VALID_ID_CHARS,
         parser,
         new AggregatorFactory[]{
             new DoubleSumAggregatorFactory("metric1", "col1"),
@@ -237,6 +250,7 @@ public class DataSchemaTest
                     null
                 ),
                 null,
+                null,
                 null
             ),
             null
@@ -244,7 +258,7 @@ public class DataSchemaTest
     );
 
     DataSchema schema = new DataSchema(
-        "test",
+        IdUtilsTest.VALID_ID_CHARS,
         parser,
         new AggregatorFactory[]{
             new DoubleSumAggregatorFactory("metric1", "col1"),
@@ -262,7 +276,7 @@ public class DataSchemaTest
   public void testSerdeWithInvalidParserMap() throws Exception
   {
     String jsonStr = "{"
-                     + "\"dataSource\":\"test\","
+                     + "\"dataSource\":\"" + StringEscapeUtils.escapeJson(IdUtilsTest.VALID_ID_CHARS) + "\","
                      + "\"parser\":{\"type\":\"invalid\"},"
                      + "\"metricsSpec\":[{\"type\":\"doubleSum\",\"name\":\"metric1\",\"fieldName\":\"col1\"}],"
                      + "\"granularitySpec\":{"
@@ -301,6 +315,7 @@ public class DataSchemaTest
                     ImmutableList.of("dimC"),
                     null
                 ),
+                null,
                 null,
                 null
             ),
@@ -365,7 +380,7 @@ public class DataSchemaTest
   public void testSerde() throws Exception
   {
     String jsonStr = "{"
-                     + "\"dataSource\":\"test\","
+                     + "\"dataSource\":\"" + StringEscapeUtils.escapeJson(IdUtilsTest.VALID_ID_CHARS) + "\","
                      + "\"parser\":{"
                      + "\"type\":\"string\","
                      + "\"parseSpec\":{"
@@ -389,12 +404,13 @@ public class DataSchemaTest
         DataSchema.class
     );
 
-    Assert.assertEquals(actual.getDataSource(), "test");
+    Assert.assertEquals(actual.getDataSource(), IdUtilsTest.VALID_ID_CHARS);
     Assert.assertEquals(
         actual.getParser().getParseSpec(),
         new JSONParseSpec(
             new TimestampSpec("xXx", null, null),
-            new DimensionsSpec(null, Arrays.asList("metric1", "xXx", "col1"), null),
+            new DimensionsSpec(null, Arrays.asList("__time", "metric1", "xXx", "col1"), null),
+            null,
             null,
             null
         )
@@ -415,6 +431,45 @@ public class DataSchemaTest
   }
 
   @Test
+  public void testSerializeWithInvalidDataSourceName() throws Exception
+  {
+    // Escape backslashes to insert a tab character in the datasource name.
+    List<String> datasources = ImmutableList.of("", "../invalid", "\tname", "name\t invalid");
+    for (String datasource : datasources) {
+      String jsonStr = "{"
+                       + "\"dataSource\":\"" + StringEscapeUtils.escapeJson(datasource) + "\","
+                       + "\"parser\":{"
+                       + "\"type\":\"string\","
+                       + "\"parseSpec\":{"
+                       + "\"format\":\"json\","
+                       + "\"timestampSpec\":{\"column\":\"xXx\", \"format\": \"auto\", \"missingValue\": null},"
+                       + "\"dimensionsSpec\":{\"dimensions\":[], \"dimensionExclusions\":[]},"
+                       + "\"flattenSpec\":{\"useFieldDiscovery\":true, \"fields\":[]},"
+                       + "\"featureSpec\":{}},"
+                       + "\"encoding\":\"UTF-8\""
+                       + "},"
+                       + "\"metricsSpec\":[{\"type\":\"doubleSum\",\"name\":\"metric1\",\"fieldName\":\"col1\"}],"
+                       + "\"granularitySpec\":{"
+                       + "\"type\":\"arbitrary\","
+                       + "\"queryGranularity\":{\"type\":\"duration\",\"duration\":86400000,\"origin\":\"1970-01-01T00:00:00.000Z\"},"
+                       + "\"intervals\":[\"2014-01-01T00:00:00.000Z/2015-01-01T00:00:00.000Z\"]}}";
+      try {
+        jsonMapper.readValue(
+            jsonMapper.writeValueAsString(
+                jsonMapper.readValue(jsonStr, DataSchema.class)
+            ),
+            DataSchema.class
+        );
+      }
+      catch (ValueInstantiationException e) {
+        Assert.assertEquals(IllegalArgumentException.class, e.getCause().getClass());
+        continue;
+      }
+      Assert.fail("Serialization of datasource " + datasource + " should have failed.");
+    }
+  }
+
+  @Test
   public void testSerdeWithUpdatedDataSchemaAddedField() throws IOException
   {
     Map<String, Object> parser = jsonMapper.convertValue(
@@ -423,6 +478,7 @@ public class DataSchemaTest
                 new TimestampSpec("time", "auto", null),
                 new DimensionsSpec(DimensionsSpec.getDefaultSchemas(ImmutableList.of("dimB", "dimA")), null, null),
                 null,
+                null,
                 null
             ),
             null
@@ -430,7 +486,7 @@ public class DataSchemaTest
     );
 
     DataSchema originalSchema = new DataSchema(
-        "test",
+        IdUtilsTest.VALID_ID_CHARS,
         parser,
         new AggregatorFactory[]{
             new DoubleSumAggregatorFactory("metric1", "col1"),
@@ -462,6 +518,7 @@ public class DataSchemaTest
                 new TimestampSpec("time", "auto", null),
                 new DimensionsSpec(DimensionsSpec.getDefaultSchemas(ImmutableList.of("dimB", "dimA")), null, null),
                 null,
+                null,
                 null
             ),
             null
@@ -469,7 +526,7 @@ public class DataSchemaTest
     );
 
     TestModifiedDataSchema originalSchema = new TestModifiedDataSchema(
-        "test",
+        IdUtilsTest.VALID_ID_CHARS,
         null,
         null,
         new AggregatorFactory[]{
@@ -492,5 +549,32 @@ public class DataSchemaTest
     Assert.assertArrayEquals(originalSchema.getAggregators(), deserialized.getAggregators());
     Assert.assertEquals(originalSchema.getTransformSpec(), deserialized.getTransformSpec());
     Assert.assertEquals(originalSchema.getParserMap(), deserialized.getParserMap());
+  }
+
+  @Test
+  public void testWithDimensionSpec()
+  {
+    TimestampSpec tsSpec = Mockito.mock(TimestampSpec.class);
+    GranularitySpec gSpec = Mockito.mock(GranularitySpec.class);
+    DimensionsSpec oldDimSpec = Mockito.mock(DimensionsSpec.class);
+    DimensionsSpec newDimSpec = Mockito.mock(DimensionsSpec.class);
+    AggregatorFactory aggFactory = Mockito.mock(AggregatorFactory.class);
+    TransformSpec transSpec = Mockito.mock(TransformSpec.class);
+    Map<String, Object> parserMap = Mockito.mock(Map.class);
+    Mockito.when(newDimSpec.withDimensionExclusions(ArgumentMatchers.any(Set.class))).thenReturn(newDimSpec);
+
+    DataSchema oldSchema = new DataSchema("dataSource", tsSpec, oldDimSpec,
+                                          new AggregatorFactory[]{aggFactory}, gSpec,
+                                          transSpec, parserMap, jsonMapper
+    );
+    DataSchema newSchema = oldSchema.withDimensionsSpec(newDimSpec);
+    Assert.assertSame(oldSchema.getDataSource(), newSchema.getDataSource());
+    Assert.assertSame(oldSchema.getTimestampSpec(), newSchema.getTimestampSpec());
+    Assert.assertSame(newDimSpec, newSchema.getDimensionsSpec());
+    Assert.assertSame(oldSchema.getAggregators(), newSchema.getAggregators());
+    Assert.assertSame(oldSchema.getGranularitySpec(), newSchema.getGranularitySpec());
+    Assert.assertSame(oldSchema.getTransformSpec(), newSchema.getTransformSpec());
+    Assert.assertSame(oldSchema.getParserMap(), newSchema.getParserMap());
+
   }
 }

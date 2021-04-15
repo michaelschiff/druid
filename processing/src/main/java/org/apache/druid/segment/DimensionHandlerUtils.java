@@ -32,17 +32,17 @@ import org.apache.druid.java.util.common.parsers.ParseException;
 import org.apache.druid.query.ColumnSelectorPlus;
 import org.apache.druid.query.dimension.ColumnSelectorStrategy;
 import org.apache.druid.query.dimension.ColumnSelectorStrategyFactory;
-import org.apache.druid.query.dimension.DefaultDimensionSpec;
 import org.apache.druid.query.dimension.DimensionSpec;
+import org.apache.druid.query.extraction.ExtractionFn;
 import org.apache.druid.segment.column.ColumnCapabilities;
 import org.apache.druid.segment.column.ColumnCapabilitiesImpl;
 import org.apache.druid.segment.column.ValueType;
-import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
 
 import javax.annotation.Nullable;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 
 public final class DimensionHandlerUtils
@@ -54,14 +54,38 @@ public final class DimensionHandlerUtils
   public static final Float ZERO_FLOAT = 0.0f;
   public static final Long ZERO_LONG = 0L;
 
+  public static final ColumnCapabilities DEFAULT_STRING_CAPABILITIES =
+      new ColumnCapabilitiesImpl().setType(ValueType.STRING)
+                                  .setDictionaryEncoded(false)
+                                  .setDictionaryValuesUnique(false)
+                                  .setDictionaryValuesSorted(false)
+                                  .setHasBitmapIndexes(false);
+
+  public static final ConcurrentHashMap<String, DimensionHandlerProvider> DIMENSION_HANDLER_PROVIDERS = new ConcurrentHashMap<>();
+
+  public static void registerDimensionHandlerProvider(String type, DimensionHandlerProvider provider)
+  {
+    DIMENSION_HANDLER_PROVIDERS.compute(type, (key, value) -> {
+      if (value == null) {
+        return provider;
+      } else {
+        if (!value.getClass().getName().equals(provider.getClass().getName())) {
+          throw new ISE(
+              "Incompatible dimensionHandlerProvider for type[%s] already exists. Expected [%s], found [%s].",
+              key,
+              value.getClass().getName(),
+              provider.getClass().getName()
+          );
+        } else {
+          return value;
+        }
+      }
+    });
+  }
+
   private DimensionHandlerUtils()
   {
   }
-
-  public static final ColumnCapabilities DEFAULT_STRING_CAPABILITIES =
-      new ColumnCapabilitiesImpl().setType(ValueType.STRING)
-                                  .setDictionaryEncoded(true)
-                                  .setHasBitmapIndexes(true);
 
   public static DimensionHandler<?, ?, ?> getHandlerFromCapabilities(
       String dimensionName,
@@ -70,16 +94,21 @@ public final class DimensionHandlerUtils
   )
   {
     if (capabilities == null) {
-      return new StringDimensionHandler(dimensionName, multiValueHandling, true);
+      return new StringDimensionHandler(dimensionName, multiValueHandling, true, false);
     }
 
     multiValueHandling = multiValueHandling == null ? MultiValueHandling.ofDefault() : multiValueHandling;
 
     if (capabilities.getType() == ValueType.STRING) {
-      if (!capabilities.isDictionaryEncoded()) {
+      if (!capabilities.isDictionaryEncoded().isTrue()) {
         throw new IAE("String column must have dictionary encoding.");
       }
-      return new StringDimensionHandler(dimensionName, multiValueHandling, capabilities.hasBitmapIndexes());
+      return new StringDimensionHandler(
+          dimensionName,
+          multiValueHandling,
+          capabilities.hasBitmapIndexes(),
+          capabilities.hasSpatialIndexes()
+      );
     }
 
     if (capabilities.getType() == ValueType.LONG) {
@@ -94,8 +123,16 @@ public final class DimensionHandlerUtils
       return new DoubleDimensionHandler(dimensionName);
     }
 
+    if (capabilities.getType() == ValueType.COMPLEX && capabilities.getComplexTypeName() != null) {
+      DimensionHandlerProvider provider = DIMENSION_HANDLER_PROVIDERS.get(capabilities.getComplexTypeName());
+      if (provider == null) {
+        throw new ISE("Can't find DimensionHandlerProvider for typeName [%s]", capabilities.getComplexTypeName());
+      }
+      return provider.get(dimensionName);
+    }
+
     // Return a StringDimensionHandler by default (null columns will be treated as String typed)
-    return new StringDimensionHandler(dimensionName, multiValueHandling, true);
+    return new StringDimensionHandler(dimensionName, multiValueHandling, true, false);
   }
 
   public static List<ValueType> getValueTypesFromDimensionSpecs(List<DimensionSpec> dimSpecs)
@@ -112,10 +149,10 @@ public final class DimensionHandlerUtils
    * {@link #createColumnSelectorPluses(ColumnSelectorStrategyFactory, List, ColumnSelectorFactory)} with a singleton
    * list of dimensionSpecs and then retrieving the only element in the returned array.
    *
-   * @param <Strategy> The strategy type created by the provided strategy factory.
-   * @param strategyFactory               A factory provided by query engines that generates type-handling strategies
-   * @param dimensionSpec                 column to generate a ColumnSelectorPlus object for
-   * @param cursor                        Used to create value selectors for columns.
+   * @param <Strategy>      The strategy type created by the provided strategy factory.
+   * @param strategyFactory A factory provided by query engines that generates type-handling strategies
+   * @param dimensionSpec   column to generate a ColumnSelectorPlus object for
+   * @param cursor          Used to create value selectors for columns.
    *
    * @return A ColumnSelectorPlus object
    *
@@ -141,10 +178,10 @@ public final class DimensionHandlerUtils
    * A caller should define a strategy factory that provides an interface for type-specific operations
    * in a query engine. See GroupByStrategyFactory for a reference.
    *
-   * @param <Strategy>                    The strategy type created by the provided strategy factory.
-   * @param strategyFactory               A factory provided by query engines that generates type-handling strategies
-   * @param dimensionSpecs                The set of columns to generate ColumnSelectorPlus objects for
-   * @param columnSelectorFactory         Used to create value selectors for columns.
+   * @param <Strategy>            The strategy type created by the provided strategy factory.
+   * @param strategyFactory       A factory provided by query engines that generates type-handling strategies
+   * @param dimensionSpecs        The set of columns to generate ColumnSelectorPlus objects for
+   * @param columnSelectorFactory Used to create value selectors for columns.
    *
    * @return An array of ColumnSelectorPlus objects, in the order of the columns specified in dimensionSpecs
    *
@@ -219,7 +256,16 @@ public final class DimensionHandlerUtils
     // Currently, all extractionFns output Strings, so the column will return String values via a
     // DimensionSelector if an extractionFn is present.
     if (dimSpec.getExtractionFn() != null) {
-      capabilities = DEFAULT_STRING_CAPABILITIES;
+      ExtractionFn fn = dimSpec.getExtractionFn();
+      capabilities = ColumnCapabilitiesImpl.copyOf(capabilities)
+                                           .setType(ValueType.STRING)
+                                           .setDictionaryValuesUnique(
+                                               capabilities.isDictionaryEncoded().isTrue() &&
+                                               fn.getExtractionType() == ExtractionFn.ExtractionType.ONE_TO_ONE
+                                           )
+                                           .setDictionaryValuesSorted(
+                                               capabilities.isDictionaryEncoded().isTrue() && fn.preservesOrdering()
+                                           );
     }
 
     // DimensionSpec's decorate only operates on DimensionSelectors, so if a spec mustDecorate(),
@@ -242,83 +288,6 @@ public final class DimensionHandlerUtils
   {
     capabilities = getEffectiveCapabilities(dimSpec, capabilities);
     return strategyFactory.makeColumnSelectorStrategy(capabilities, selector);
-  }
-
-  /**
-   * Equivalent to calling makeVectorProcessor(DefaultDimensionSpec.of(column), strategyFactory, selectorFactory).
-   *
-   * @see #makeVectorProcessor(DimensionSpec, VectorColumnProcessorFactory, VectorColumnSelectorFactory)
-   * @see ColumnProcessors#makeProcessor the non-vectorized version
-   */
-  public static <T> T makeVectorProcessor(
-      final String column,
-      final VectorColumnProcessorFactory<T> strategyFactory,
-      final VectorColumnSelectorFactory selectorFactory
-  )
-  {
-    return makeVectorProcessor(DefaultDimensionSpec.of(column), strategyFactory, selectorFactory);
-  }
-
-  /**
-   * Creates "vector processors", which are objects that wrap a single vectorized input column and provide some
-   * functionality on top of it. Used by things like query engines and filter matchers.
-   *
-   * Supports the basic types STRING, LONG, DOUBLE, and FLOAT.
-   *
-   * @param dimensionSpec   dimensionSpec for the input to the processor
-   * @param strategyFactory object that encapsulates the knowledge about how to create processors
-   * @param selectorFactory column selector factory used for creating the vector processor
-   *
-   * @see ColumnProcessors#makeProcessor the non-vectorized version
-   */
-  public static <T> T makeVectorProcessor(
-      final DimensionSpec dimensionSpec,
-      final VectorColumnProcessorFactory<T> strategyFactory,
-      final VectorColumnSelectorFactory selectorFactory
-  )
-  {
-    final ColumnCapabilities capabilities = getEffectiveCapabilities(
-        dimensionSpec,
-        selectorFactory.getColumnCapabilities(dimensionSpec.getDimension())
-    );
-
-    final ValueType type = capabilities.getType();
-
-    if (type == ValueType.STRING) {
-      if (capabilities.hasMultipleValues()) {
-        return strategyFactory.makeMultiValueDimensionProcessor(
-            selectorFactory.makeMultiValueDimensionSelector(dimensionSpec)
-        );
-      } else {
-        return strategyFactory.makeSingleValueDimensionProcessor(
-            selectorFactory.makeSingleValueDimensionSelector(dimensionSpec)
-        );
-      }
-    } else {
-      Preconditions.checkState(
-          dimensionSpec.getExtractionFn() == null && !dimensionSpec.mustDecorate(),
-          "Uh oh, was about to try to make a value selector for type[%s] with a dimensionSpec of class[%s] that "
-          + "requires decoration. Possible bug.",
-          type,
-          dimensionSpec.getClass().getName()
-      );
-
-      if (type == ValueType.LONG) {
-        return strategyFactory.makeLongProcessor(
-            selectorFactory.makeValueSelector(dimensionSpec.getDimension())
-        );
-      } else if (type == ValueType.FLOAT) {
-        return strategyFactory.makeFloatProcessor(
-            selectorFactory.makeValueSelector(dimensionSpec.getDimension())
-        );
-      } else if (type == ValueType.DOUBLE) {
-        return strategyFactory.makeDoubleProcessor(
-            selectorFactory.makeValueSelector(dimensionSpec.getDimension())
-        );
-      } else {
-        throw new ISE("Unsupported type[%s]", capabilities.getType());
-      }
-    }
   }
 
   @Nullable

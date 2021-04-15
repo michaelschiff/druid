@@ -73,4 +73,5 @@
   <suppress checks=".*" files="GoGoProtos.java" />
   <suppress checks=".*" files="JournalGrpc.java" />
   <suppress checks=".*" files="Protocol.java" />
+  <suppress checks="AvoidStaticImport" files="[\\/]src[\\/](test)[\\/]"/>
 </suppressions>

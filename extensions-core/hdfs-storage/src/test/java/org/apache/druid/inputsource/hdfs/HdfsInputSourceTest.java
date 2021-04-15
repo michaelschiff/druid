@@ -20,8 +20,11 @@
 package org.apache.druid.inputsource.hdfs;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
-import com.fasterxml.jackson.databind.InjectableValues;
+import com.fasterxml.jackson.databind.InjectableValues.Std;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterables;
+import org.apache.druid.data.input.ColumnsFilter;
 import org.apache.druid.data.input.InputFormat;
 import org.apache.druid.data.input.InputRow;
 import org.apache.druid.data.input.InputRowSchema;
@@ -34,6 +37,7 @@ import org.apache.druid.data.input.impl.DimensionsSpec;
 import org.apache.druid.data.input.impl.TimestampSpec;
 import org.apache.druid.java.util.common.parsers.CloseableIterator;
 import org.apache.druid.storage.hdfs.HdfsStorageDruidModule;
+import org.apache.druid.testing.InitializedNullHandlingTest;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hdfs.MiniDFSCluster;
@@ -64,15 +68,16 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 @RunWith(Enclosed.class)
-public class HdfsInputSourceTest
+public class HdfsInputSourceTest extends InitializedNullHandlingTest
 {
-  private static final String PATH = "/foo/bar";
+  private static final String PATH = "hdfs://localhost:7020/foo/bar";
   private static final Configuration CONFIGURATION = new Configuration();
+  private static final HdfsInputSourceConfig DEFAULT_INPUT_SOURCE_CONFIG = new HdfsInputSourceConfig(null);
   private static final String COLUMN = "value";
   private static final InputRowSchema INPUT_ROW_SCHEMA = new InputRowSchema(
       new TimestampSpec(null, null, null),
       DimensionsSpec.EMPTY,
-      Collections.emptyList()
+      ColumnsFilter.all()
   );
   private static final InputFormat INPUT_FORMAT = new CsvInputFormat(
       Arrays.asList(TimestampSpec.DEFAULT_COLUMN, COLUMN),
@@ -81,6 +86,80 @@ public class HdfsInputSourceTest
       null,
       0
   );
+
+  public static class ConstructorTest
+  {
+    @Rule
+    public ExpectedException expectedException = ExpectedException.none();
+
+    @Test
+    public void testConstructorAllowsOnlyDefaultProtocol()
+    {
+      HdfsInputSource.builder()
+                     .paths(PATH + "*")
+                     .configuration(CONFIGURATION)
+                     .inputSourceConfig(DEFAULT_INPUT_SOURCE_CONFIG)
+                     .build();
+
+      expectedException.expect(IllegalArgumentException.class);
+      expectedException.expectMessage("Only [hdfs] protocols are allowed");
+      HdfsInputSource.builder()
+                     .paths("file:/foo/bar*")
+                     .configuration(CONFIGURATION)
+                     .inputSourceConfig(DEFAULT_INPUT_SOURCE_CONFIG)
+                     .build();
+    }
+
+    @Test
+    public void testConstructorAllowsOnlyCustomProtocol()
+    {
+      final Configuration conf = new Configuration();
+      conf.set("fs.ftp.impl", "org.apache.hadoop.fs.ftp.FTPFileSystem");
+      HdfsInputSource.builder()
+                     .paths("ftp://localhost:21/foo/bar")
+                     .configuration(CONFIGURATION)
+                     .inputSourceConfig(new HdfsInputSourceConfig(ImmutableSet.of("ftp")))
+                     .build();
+
+      expectedException.expect(IllegalArgumentException.class);
+      expectedException.expectMessage("Only [druid] protocols are allowed");
+      HdfsInputSource.builder()
+                     .paths(PATH + "*")
+                     .configuration(CONFIGURATION)
+                     .inputSourceConfig(new HdfsInputSourceConfig(ImmutableSet.of("druid")))
+                     .build();
+    }
+
+    @Test
+    public void testConstructorWithDefaultHdfs()
+    {
+      final Configuration conf = new Configuration();
+      conf.set("fs.default.name", "hdfs://localhost:7020");
+      HdfsInputSource.builder()
+                     .paths("/foo/bar*")
+                     .configuration(conf)
+                     .inputSourceConfig(DEFAULT_INPUT_SOURCE_CONFIG)
+                     .build();
+
+      HdfsInputSource.builder()
+                     .paths("foo/bar*")
+                     .configuration(conf)
+                     .inputSourceConfig(DEFAULT_INPUT_SOURCE_CONFIG)
+                     .build();
+
+      HdfsInputSource.builder()
+                     .paths("hdfs:///foo/bar*")
+                     .configuration(conf)
+                     .inputSourceConfig(DEFAULT_INPUT_SOURCE_CONFIG)
+                     .build();
+
+      HdfsInputSource.builder()
+                     .paths("hdfs://localhost:10020/foo/bar*") // different hdfs
+                     .configuration(conf)
+                     .inputSourceConfig(DEFAULT_INPUT_SOURCE_CONFIG)
+                     .build();
+    }
+  }
 
   public static class SerializeDeserializeTest
   {
@@ -96,7 +175,8 @@ public class HdfsInputSourceTest
     {
       hdfsInputSourceBuilder = HdfsInputSource.builder()
                                               .paths(PATH)
-                                              .configuration(CONFIGURATION);
+                                              .configuration(CONFIGURATION)
+                                              .inputSourceConfig(DEFAULT_INPUT_SOURCE_CONFIG);
     }
 
     @Test
@@ -137,7 +217,11 @@ public class HdfsInputSourceTest
     private static ObjectMapper createObjectMapper()
     {
       final ObjectMapper mapper = new ObjectMapper();
-      mapper.setInjectableValues(new InjectableValues.Std().addValue(Configuration.class, new Configuration()));
+      mapper.setInjectableValues(
+          new Std()
+              .addValue(Configuration.class, new Configuration())
+              .addValue(HdfsInputSourceConfig.class, DEFAULT_INPUT_SOURCE_CONFIG)
+      );
       new HdfsStorageDruidModule().getJacksonModules().forEach(mapper::registerModule);
       return mapper;
     }
@@ -202,6 +286,7 @@ public class HdfsInputSourceTest
       target = HdfsInputSource.builder()
                               .paths(dfsCluster.getURI() + PATH + "*")
                               .configuration(CONFIGURATION)
+                              .inputSourceConfig(DEFAULT_INPUT_SOURCE_CONFIG)
                               .build();
     }
 
@@ -249,7 +334,7 @@ public class HdfsInputSourceTest
     public void hasCorrectSplits() throws IOException
     {
       // Set maxSplitSize to 1 so that each inputSplit has only one object
-      List<InputSplit<List<Path>>> splits = target.createSplits(null, new MaxSizeSplitHintSpec(1L))
+      List<InputSplit<List<Path>>> splits = target.createSplits(null, new MaxSizeSplitHintSpec(1L, null))
                                                   .collect(Collectors.toList());
       splits.forEach(split -> Assert.assertEquals(1, split.get().size()));
       Set<Path> actualPaths = splits.stream()
@@ -262,7 +347,7 @@ public class HdfsInputSourceTest
     @Test
     public void createSplitsRespectSplitHintSpec() throws IOException
     {
-      List<InputSplit<List<Path>>> splits = target.createSplits(null, new MaxSizeSplitHintSpec(7L))
+      List<InputSplit<List<Path>>> splits = target.createSplits(null, new MaxSizeSplitHintSpec(7L, null))
                                                   .collect(Collectors.toList());
       Assert.assertEquals(2, splits.size());
       Assert.assertEquals(2, splits.get(0).get().size());
@@ -273,8 +358,22 @@ public class HdfsInputSourceTest
     public void hasCorrectNumberOfSplits() throws IOException
     {
       // Set maxSplitSize to 1 so that each inputSplit has only one object
-      int numSplits = target.estimateNumSplits(null, new MaxSizeSplitHintSpec(1L));
+      int numSplits = target.estimateNumSplits(null, new MaxSizeSplitHintSpec(1L, null));
       Assert.assertEquals(NUM_FILE, numSplits);
+    }
+
+    @Test
+    public void createCorrectInputSourceWithSplit() throws Exception
+    {
+      List<InputSplit<List<Path>>> splits = target.createSplits(null, new MaxSizeSplitHintSpec(null, 1))
+                                                  .collect(Collectors.toList());
+
+      for (InputSplit<List<Path>> split : splits) {
+        String expectedPath = Iterables.getOnlyElement(split.get()).toString();
+        HdfsInputSource inputSource = (HdfsInputSource) target.withSplit(split);
+        String actualPath = Iterables.getOnlyElement(inputSource.getInputPaths());
+        Assert.assertEquals(expectedPath, actualPath);
+      }
     }
   }
 
@@ -288,6 +387,7 @@ public class HdfsInputSourceTest
       target = HdfsInputSource.builder()
                               .paths(Collections.emptyList())
                               .configuration(CONFIGURATION)
+                              .inputSourceConfig(DEFAULT_INPUT_SOURCE_CONFIG)
                               .build();
     }
 

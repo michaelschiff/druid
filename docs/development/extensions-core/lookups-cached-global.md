@@ -48,9 +48,9 @@ Globally cached lookups can be specified as part of the [cluster wide config for
        "namespaceParseSpec": {
          "format": "csv",
          "columns": [
-           "key",
-           "value"
-         ]
+             "[\"key\"",
+             "\"value\"]"
+      ]
        },
        "pollPeriod": "PT5M"
      },
@@ -86,7 +86,7 @@ The parameters are as follows
 |--------|-----------|--------|-------|
 |`extractionNamespace`|Specifies how to populate the local cache. See below|Yes|-|
 |`firstCacheTimeout`|How long to wait (in ms) for the first run of the cache to populate. 0 indicates to not wait|No|`0` (do not wait)|
-|`injective`|If the underlying map is [injective](../../querying/lookups.html#query-execution) (keys and values are unique) then optimizations can occur internally by setting this to `true`|No|`false`|
+|`injective`|If the underlying map is [injective](../../querying/lookups.md#query-execution) (keys and values are unique) then optimizations can occur internally by setting this to `true`|No|`false`|
 
 If `firstCacheTimeout` is set to a non-zero value, it should be less than `druid.manager.lookups.hostUpdateTimeout`. If `firstCacheTimeout` is NOT set, then management is essentially asynchronous and does not know if a lookup succeeded or failed in starting. In such a case logs from the processes using lookups should be monitored for repeated failures.
 
@@ -95,7 +95,7 @@ Proper functionality of globally cached lookups requires the following extension
 
 ## Example configuration
 
-In a simple case where only one [tier](../../querying/lookups.html#dynamic-configuration) exists (`realtime_customer2`) with one `cachedNamespace` lookup called `country_code`, the resulting configuration JSON looks similar to the following:
+In a simple case where only one [tier](../../querying/lookups.md#dynamic-configuration) exists (`realtime_customer2`) with one `cachedNamespace` lookup called `country_code`, the resulting configuration JSON looks similar to the following:
 
 ```json
 {
@@ -186,7 +186,10 @@ The remapping values for each globally cached lookup can be specified by a JSON 
   "uri": "s3://bucket/some/key/prefix/renames-0003.gz",
   "namespaceParseSpec":{
     "format":"csv",
-    "columns":["key","value"]
+    "columns":[
+        "[\"key\"",
+        "\"value\"]"
+      ]
   },
   "pollPeriod":"PT5M"
 }
@@ -199,7 +202,10 @@ The remapping values for each globally cached lookup can be specified by a JSON 
   "fileRegex":"renames-[0-9]*\\.gz",
   "namespaceParseSpec":{
     "format":"csv",
-    "columns":["key","value"]
+    "columns":[
+        "[\"key\"",
+        "\"value\"]"
+      ]
   },
   "pollPeriod":"PT5M"
 }
@@ -208,12 +214,12 @@ The remapping values for each globally cached lookup can be specified by a JSON 
 |Property|Description|Required|Default|
 |--------|-----------|--------|-------|
 |`pollPeriod`|Period between polling for updates|No|0 (only once)|
-|`uri`|URI for the file of interest|No|Use `uriPrefix`|
-|`uriPrefix`|A URI which specifies a directory (or other searchable resource) in which to search for files|No|Use `uri`|
+|`uri`|URI for the file of interest, specified as a file, hdfs, s3 or gs path|No|Use `uriPrefix`|
+|`uriPrefix`|A URI that specifies a directory (or other searchable resource) in which to search for files|No|Use `uri`|
 |`fileRegex`|Optional regex for matching the file name under `uriPrefix`. Only used if `uriPrefix` is used|No|`".*"`|
 |`namespaceParseSpec`|How to interpret the data at the URI|Yes||
 
-One of either `uri` xor `uriPrefix` must be specified.
+One of either `uri` or `uriPrefix` must be specified, as either a local file system (file://), HDFS (hdfs://), S3 (s3://) or GCS (gs://) location. HTTP location is not currently supported.
 
 The `pollPeriod` value specifies the period in ISO 8601 format between checks for replacement data for the lookup. If the source of the lookup is capable of providing a timestamp, the lookup will only be updated if it has changed since the prior tick of `pollPeriod`. A value of 0, an absent parameter, or `null` all mean populate once and do not attempt to look for new data later. Whenever an poll occurs, the updating system will look for a file with the most recent timestamp and assume that one with the most recent data set, replacing the local cache of the lookup data.
 
@@ -341,7 +347,6 @@ The JDBC lookups will poll a database to populate its local cache. If the `tsCol
 
 |Parameter|Description|Required|Default|
 |---------|-----------|--------|-------|
-|`namespace`|The namespace to define|Yes||
 |`connectorConfig`|The connector config to use|Yes||
 |`table`|The table which contains the key value pairs|Yes||
 |`keyColumn`|The column in `table` which contains the keys|Yes||
@@ -353,7 +358,6 @@ The JDBC lookups will poll a database to populate its local cache. If the `tsCol
 ```json
 {
   "type":"jdbc",
-  "namespace":"some_lookup",
   "connectorConfig":{
     "createTables":true,
     "connectURI":"jdbc:mysql://localhost:3306/druid",
@@ -371,7 +375,8 @@ The JDBC lookups will poll a database to populate its local cache. If the `tsCol
 > If using JDBC, you will need to add your database's client JAR files to the extension's directory.
 > For Postgres, the connector JAR is already included.
 > For MySQL, you can get it from https://dev.mysql.com/downloads/connector/j/.
-> Copy or symlink the downloaded file to `extensions/druid-lookups-cached-global` under the distribution root directory.
+> The connector JAR should reside in the classpath of Druid's main class loader.
+> To add the connector JAR to the classpath, you can copy the downloaded file to `lib/` under the distribution root directory. Alternatively, create a symbolic link to the connector in the `lib` directory.
 
 ## Introspection
 

@@ -21,22 +21,25 @@ package org.apache.druid.segment.join;
 
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
+import org.apache.druid.java.util.common.ISE;
 import org.apache.druid.java.util.common.granularity.Granularity;
 import org.apache.druid.java.util.common.guava.Sequence;
 import org.apache.druid.java.util.common.guava.Sequences;
+import org.apache.druid.java.util.common.io.Closer;
 import org.apache.druid.query.QueryMetrics;
 import org.apache.druid.query.filter.Filter;
-import org.apache.druid.segment.Capabilities;
 import org.apache.druid.segment.Cursor;
 import org.apache.druid.segment.Metadata;
 import org.apache.druid.segment.StorageAdapter;
 import org.apache.druid.segment.VirtualColumn;
 import org.apache.druid.segment.VirtualColumns;
 import org.apache.druid.segment.column.ColumnCapabilities;
+import org.apache.druid.segment.column.ColumnHolder;
 import org.apache.druid.segment.data.Indexed;
 import org.apache.druid.segment.data.ListIndexed;
 import org.apache.druid.segment.join.filter.JoinFilterAnalyzer;
 import org.apache.druid.segment.join.filter.JoinFilterPreAnalysis;
+import org.apache.druid.segment.join.filter.JoinFilterPreAnalysisKey;
 import org.apache.druid.segment.join.filter.JoinFilterSplit;
 import org.joda.time.DateTime;
 import org.joda.time.Interval;
@@ -53,21 +56,41 @@ import java.util.Set;
 public class HashJoinSegmentStorageAdapter implements StorageAdapter
 {
   private final StorageAdapter baseAdapter;
+  private final Filter baseFilter;
   private final List<JoinableClause> clauses;
   private final JoinFilterPreAnalysis joinFilterPreAnalysis;
 
   /**
-   * @param baseAdapter          A StorageAdapter for the left-hand side base segment
-   * @param clauses              The right-hand side clauses. The caller is responsible for ensuring that there are no
-   *                             duplicate prefixes or prefixes that shadow each other across the clauses
+   * @param baseAdapter           A StorageAdapter for the left-hand side base segment
+   * @param clauses               The right-hand side clauses. The caller is responsible for ensuring that there are no
+   *                              duplicate prefixes or prefixes that shadow each other across the clauses
+   * @param joinFilterPreAnalysis Pre-analysis for the query we expect to run on this storage adapter
    */
   HashJoinSegmentStorageAdapter(
-      StorageAdapter baseAdapter,
-      List<JoinableClause> clauses,
+      final StorageAdapter baseAdapter,
+      final List<JoinableClause> clauses,
+      final JoinFilterPreAnalysis joinFilterPreAnalysis
+  )
+  {
+    this(baseAdapter, null, clauses, joinFilterPreAnalysis);
+  }
+
+  /**
+   * @param baseAdapter           A StorageAdapter for the left-hand side base segment
+   * @param baseFilter            A filter for the left-hand side base segment
+   * @param clauses               The right-hand side clauses. The caller is responsible for ensuring that there are no
+   *                              duplicate prefixes or prefixes that shadow each other across the clauses
+   * @param joinFilterPreAnalysis Pre-analysis for the query we expect to run on this storage adapter
+   */
+  HashJoinSegmentStorageAdapter(
+      final StorageAdapter baseAdapter,
+      final Filter baseFilter,
+      final List<JoinableClause> clauses,
       final JoinFilterPreAnalysis joinFilterPreAnalysis
   )
   {
     this.baseAdapter = baseAdapter;
+    this.baseFilter = baseFilter;
     this.clauses = clauses;
     this.joinFilterPreAnalysis = joinFilterPreAnalysis;
   }
@@ -146,16 +169,6 @@ public class HashJoinSegmentStorageAdapter implements StorageAdapter
     }
   }
 
-  @Override
-  public Capabilities getCapabilities()
-  {
-    // Dictionaries in the joinables may not be sorted. Unfortunately this API does not let us be granular about what
-    // is and isn't sorted, so return false globally. At the time of this writing, the only query affected by this
-    // is a topN with lexicographic sort and 'previousStop' set (it will not be able to skip values based on
-    // dictionary code).
-    return Capabilities.builder().dimensionValuesSorted(false).build();
-  }
-
   @Nullable
   @Override
   public ColumnCapabilities getColumnCapabilities(String column)
@@ -218,6 +231,25 @@ public class HashJoinSegmentStorageAdapter implements StorageAdapter
       @Nullable final QueryMetrics<?> queryMetrics
   )
   {
+    // Filter pre-analysis key implied by the call to "makeCursors". We need to sanity-check that it matches
+    // the actual pre-analysis that was done. Note: we can't infer a rewrite config from the "makeCursors" call (it
+    // requires access to the query context) so we'll need to skip sanity-checking it, by re-using the one present
+    // in the cached key.)
+    final JoinFilterPreAnalysisKey keyIn =
+        new JoinFilterPreAnalysisKey(
+            joinFilterPreAnalysis.getKey().getRewriteConfig(),
+            clauses,
+            virtualColumns,
+            filter
+        );
+
+    final JoinFilterPreAnalysisKey keyCached = joinFilterPreAnalysis.getKey();
+
+    if (!keyIn.equals(keyCached)) {
+      // It is a bug if this happens. The implied key and the cached key should always match.
+      throw new ISE("Pre-analysis mismatch, cannot execute query");
+    }
+
     final List<VirtualColumn> preJoinVirtualColumns = new ArrayList<>();
     final List<VirtualColumn> postJoinVirtualColumns = new ArrayList<>();
 
@@ -227,14 +259,12 @@ public class HashJoinSegmentStorageAdapter implements StorageAdapter
         postJoinVirtualColumns
     );
 
-    JoinFilterSplit joinFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis);
+    // We merge the filter on base table specified by the user and filter on the base table that is pushed from
+    // the join
+    JoinFilterSplit joinFilterSplit = JoinFilterAnalyzer.splitFilter(joinFilterPreAnalysis, baseFilter);
     preJoinVirtualColumns.addAll(joinFilterSplit.getPushDownVirtualColumns());
 
-    // Soon, we will need a way to push filters past a join when possible. This could potentially be done right here
-    // (by splitting out pushable pieces of 'filter') or it could be done at a higher level (i.e. in the SQL planner).
-    //
-    // If it's done in the SQL planner, that will likely mean adding a 'baseFilter' parameter to this class that would
-    // be passed in to the below baseAdapter.makeCursors call (instead of the null filter).
+
     final Sequence<Cursor> baseCursorSequence = baseAdapter.makeCursors(
         joinFilterSplit.getBaseTableFilter().isPresent() ? joinFilterSplit.getBaseTableFilter().get() : null,
         interval,
@@ -244,13 +274,15 @@ public class HashJoinSegmentStorageAdapter implements StorageAdapter
         queryMetrics
     );
 
-    return Sequences.map(
+    Closer joinablesCloser = Closer.create();
+    return Sequences.<Cursor, Cursor>map(
         baseCursorSequence,
         cursor -> {
+          assert cursor != null;
           Cursor retVal = cursor;
 
           for (JoinableClause clause : clauses) {
-            retVal = HashJoinEngine.makeJoinCursor(retVal, clause);
+            retVal = HashJoinEngine.makeJoinCursor(retVal, clause, descending, joinablesCloser);
           }
 
           return PostJoinCursor.wrap(
@@ -259,7 +291,7 @@ public class HashJoinSegmentStorageAdapter implements StorageAdapter
               joinFilterSplit.getJoinTableFilter().isPresent() ? joinFilterSplit.getJoinTableFilter().get() : null
           );
         }
-    );
+    ).withBaggage(joinablesCloser);
   }
 
   /**
@@ -292,6 +324,7 @@ public class HashJoinSegmentStorageAdapter implements StorageAdapter
   )
   {
     final Set<String> baseColumns = new HashSet<>();
+    baseColumns.add(ColumnHolder.TIME_COLUMN_NAME);
     Iterables.addAll(baseColumns, baseAdapter.getAvailableDimensions());
     Iterables.addAll(baseColumns, baseAdapter.getAvailableMetrics());
 

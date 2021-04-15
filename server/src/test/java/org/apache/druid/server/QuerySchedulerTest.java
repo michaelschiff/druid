@@ -30,14 +30,12 @@ import com.google.common.util.concurrent.MoreExecutors;
 import com.google.inject.Injector;
 import com.google.inject.Key;
 import com.google.inject.ProvisionException;
-import io.github.resilience4j.bulkhead.Bulkhead;
 import org.apache.druid.client.SegmentServerSelector;
 import org.apache.druid.guice.GuiceInjectors;
 import org.apache.druid.guice.JsonConfigProvider;
 import org.apache.druid.guice.JsonConfigurator;
 import org.apache.druid.guice.annotations.Global;
 import org.apache.druid.guice.annotations.Json;
-import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.concurrent.Execs;
 import org.apache.druid.java.util.common.guava.BaseSequence;
 import org.apache.druid.java.util.common.guava.LazySequence;
@@ -47,6 +45,7 @@ import org.apache.druid.java.util.common.guava.Sequences;
 import org.apache.druid.java.util.common.guava.Yielder;
 import org.apache.druid.java.util.common.guava.Yielders;
 import org.apache.druid.query.Query;
+import org.apache.druid.query.QueryCapacityExceededException;
 import org.apache.druid.query.QueryContexts;
 import org.apache.druid.query.QueryPlus;
 import org.apache.druid.query.aggregation.CountAggregatorFactory;
@@ -73,7 +72,6 @@ import java.util.UUID;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.atomic.AtomicLong;
 
 public class QuerySchedulerTest
 {
@@ -212,7 +210,7 @@ public class QuerySchedulerTest
   public void testHiLoFailsWhenOutOfLaneCapacity()
   {
     expected.expectMessage(
-        StringUtils.format(QueryCapacityExceededException.ERROR_MESSAGE_TEMPLATE, HiLoQueryLaningStrategy.LOW)
+        QueryCapacityExceededException.makeLaneErrorMessage(HiLoQueryLaningStrategy.LOW, TEST_LO_CAPACITY)
     );
     expected.expect(QueryCapacityExceededException.class);
 
@@ -237,7 +235,7 @@ public class QuerySchedulerTest
   @Test
   public void testHiLoFailsWhenOutOfTotalCapacity()
   {
-    expected.expectMessage(QueryCapacityExceededException.ERROR_MESSAGE);
+    expected.expectMessage(QueryCapacityExceededException.makeTotalErrorMessage(TEST_HI_CAPACITY));
     expected.expect(QueryCapacityExceededException.class);
 
     Query<?> interactive1 = scheduler.prioritizeAndLaneQuery(QueryPlus.wrap(makeInteractiveQuery()), ImmutableSet.of());
@@ -708,96 +706,5 @@ public class QuerySchedulerTest
         new InjectableValues.Std().addValue(ServerConfig.class, injector.getInstance(ServerConfig.class))
     );
     return injector;
-  }
-
-  private static class ObservableQueryScheduler extends QueryScheduler
-  {
-    private final AtomicLong totalAcquired;
-    private final AtomicLong totalReleased;
-    private final AtomicLong laneAcquired;
-    private final AtomicLong laneNotAcquired;
-    private final AtomicLong laneReleased;
-
-    public ObservableQueryScheduler(
-        int totalNumThreads,
-        QueryPrioritizationStrategy prioritizationStrategy,
-        QueryLaningStrategy laningStrategy,
-        ServerConfig serverConfig
-    )
-    {
-      super(totalNumThreads, prioritizationStrategy, laningStrategy, serverConfig);
-
-      totalAcquired = new AtomicLong();
-      totalReleased = new AtomicLong();
-      laneAcquired = new AtomicLong();
-      laneNotAcquired = new AtomicLong();
-      laneReleased = new AtomicLong();
-    }
-
-    @Override
-    List<Bulkhead> acquireLanes(Query<?> query)
-    {
-      List<Bulkhead> bulkheads = super.acquireLanes(query);
-      if (bulkheads.stream().anyMatch(b -> b.getName().equals(QueryScheduler.TOTAL))) {
-        totalAcquired.incrementAndGet();
-      }
-      if (bulkheads.stream().anyMatch(b -> !b.getName().equals(QueryScheduler.TOTAL))) {
-        laneAcquired.incrementAndGet();
-      }
-
-      return bulkheads;
-    }
-
-    @Override
-    void releaseLanes(List<Bulkhead> bulkheads)
-    {
-      super.releaseLanes(bulkheads);
-      if (bulkheads.stream().anyMatch(b -> b.getName().equals(QueryScheduler.TOTAL))) {
-        totalReleased.incrementAndGet();
-      }
-      if (bulkheads.stream().anyMatch(b -> !b.getName().equals(QueryScheduler.TOTAL))) {
-        laneReleased.incrementAndGet();
-        if (bulkheads.size() == 1) {
-          laneNotAcquired.incrementAndGet();
-        }
-      }
-    }
-
-    @Override
-    void finishLanes(List<Bulkhead> bulkheads)
-    {
-      super.finishLanes(bulkheads);
-      if (bulkheads.stream().anyMatch(b -> b.getName().equals(QueryScheduler.TOTAL))) {
-        totalReleased.incrementAndGet();
-      }
-      if (bulkheads.stream().anyMatch(b -> !b.getName().equals(QueryScheduler.TOTAL))) {
-        laneReleased.incrementAndGet();
-      }
-    }
-
-    public AtomicLong getTotalAcquired()
-    {
-      return totalAcquired;
-    }
-
-    public AtomicLong getTotalReleased()
-    {
-      return totalReleased;
-    }
-
-    public AtomicLong getLaneAcquired()
-    {
-      return laneAcquired;
-    }
-
-    public AtomicLong getLaneNotAcquired()
-    {
-      return laneNotAcquired;
-    }
-
-    public AtomicLong getLaneReleased()
-    {
-      return laneReleased;
-    }
   }
 }

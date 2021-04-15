@@ -22,7 +22,6 @@ package org.apache.druid.client;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.smile.SmileFactory;
 import com.fasterxml.jackson.dataformat.smile.SmileGenerator;
-import com.google.common.base.Function;
 import com.google.common.base.Predicates;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -111,22 +110,20 @@ public class BrokerServerViewTest extends CuratorTestBase
     setupZNodeForServer(druidServer, zkPathsConfig, jsonMapper);
 
     final DataSegment segment = dataSegmentWithIntervalAndVersion("2014-10-20T00:00:00Z/P1D", "v1");
+    final int partition = segment.getShardSpec().getPartitionNum();
+    final Interval intervals = Intervals.of("2014-10-20T00:00:00Z/P1D");
     announceSegmentForServer(druidServer, segment, zkPathsConfig, jsonMapper);
     Assert.assertTrue(timing.forWaiting().awaitLatch(segmentViewInitLatch));
     Assert.assertTrue(timing.forWaiting().awaitLatch(segmentAddedLatch));
 
-    TimelineLookup timeline = brokerServerView.getTimeline(
+    TimelineLookup<String, ServerSelector> timeline = brokerServerView.getTimeline(
         DataSourceAnalysis.forDataSource(new TableDataSource("test_broker_server_view"))
     ).get();
-    List<TimelineObjectHolder> serverLookupRes = (List<TimelineObjectHolder>) timeline.lookup(
-        Intervals.of(
-            "2014-10-20T00:00:00Z/P1D"
-        )
-    );
+    List<TimelineObjectHolder<String, ServerSelector>> serverLookupRes = timeline.lookup(intervals);
     Assert.assertEquals(1, serverLookupRes.size());
 
     TimelineObjectHolder<String, ServerSelector> actualTimelineObjectHolder = serverLookupRes.get(0);
-    Assert.assertEquals(Intervals.of("2014-10-20T00:00:00Z/P1D"), actualTimelineObjectHolder.getInterval());
+    Assert.assertEquals(intervals, actualTimelineObjectHolder.getInterval());
     Assert.assertEquals("v1", actualTimelineObjectHolder.getVersion());
 
     PartitionHolder<ServerSelector> actualPartitionHolder = actualTimelineObjectHolder.getObject();
@@ -136,16 +133,17 @@ public class BrokerServerViewTest extends CuratorTestBase
     ServerSelector selector = (actualPartitionHolder.iterator().next()).getObject();
     Assert.assertFalse(selector.isEmpty());
     Assert.assertEquals(segment, selector.getSegment());
-    Assert.assertEquals(druidServer, selector.pick().getServer());
+    Assert.assertEquals(druidServer, selector.pick(null).getServer());
+    Assert.assertNotNull(timeline.findChunk(intervals, "v1", partition));
 
     unannounceSegmentForServer(druidServer, segment, zkPathsConfig);
     Assert.assertTrue(timing.forWaiting().awaitLatch(segmentRemovedLatch));
 
     Assert.assertEquals(
         0,
-        ((List<TimelineObjectHolder>) timeline.lookup(Intervals.of("2014-10-20T00:00:00Z/P1D"))).size()
+        timeline.lookup(intervals).size()
     );
-    Assert.assertNull(timeline.findEntry(Intervals.of("2014-10-20T00:00:00Z/P1D"), "v1"));
+    Assert.assertNull(timeline.findChunk(intervals, "v1", partition));
   }
 
   @Test
@@ -161,22 +159,15 @@ public class BrokerServerViewTest extends CuratorTestBase
 
     final List<DruidServer> druidServers = Lists.transform(
         ImmutableList.of("locahost:0", "localhost:1", "localhost:2", "localhost:3", "localhost:4"),
-        new Function<String, DruidServer>()
-        {
-          @Override
-          public DruidServer apply(String input)
-          {
-            return new DruidServer(
-                input,
-                input,
-                null,
-                10000000L,
-                ServerType.HISTORICAL,
-                "default_tier",
-                0
-            );
-          }
-        }
+        input -> new DruidServer(
+            input,
+            input,
+            null,
+            10000000L,
+            ServerType.HISTORICAL,
+            "default_tier",
+            0
+        )
     );
 
     for (DruidServer druidServer : druidServers) {
@@ -190,14 +181,7 @@ public class BrokerServerViewTest extends CuratorTestBase
             Pair.of("2011-04-01/2011-04-09", "v2"),
             Pair.of("2011-04-06/2011-04-09", "v3"),
             Pair.of("2011-04-01/2011-04-02", "v3")
-        ), new Function<Pair<String, String>, DataSegment>()
-        {
-          @Override
-          public DataSegment apply(Pair<String, String> input)
-          {
-            return dataSegmentWithIntervalAndVersion(input.lhs, input.rhs);
-          }
-        }
+        ), input -> dataSegmentWithIntervalAndVersion(input.lhs, input.rhs)
     );
 
     for (int i = 0; i < 5; ++i) {
@@ -261,6 +245,114 @@ public class BrokerServerViewTest extends CuratorTestBase
     );
   }
 
+  @Test
+  public void testMultipleServerAndBroker() throws Exception
+  {
+    segmentViewInitLatch = new CountDownLatch(1);
+    segmentAddedLatch = new CountDownLatch(6);
+
+    // temporarily set latch count to 1
+    segmentRemovedLatch = new CountDownLatch(1);
+
+    setupViews();
+
+    final DruidServer druidBroker = new DruidServer(
+        "localhost:5",
+        "localhost:5",
+        null,
+        10000000L,
+        ServerType.BROKER,
+        "default_tier",
+        0
+    );
+
+    final List<DruidServer> druidServers = Lists.transform(
+        ImmutableList.of("locahost:0", "localhost:1", "localhost:2", "localhost:3", "localhost:4"),
+        input -> new DruidServer(
+            input,
+            input,
+            null,
+            10000000L,
+            ServerType.HISTORICAL,
+            "default_tier",
+            0
+        )
+    );
+
+    setupZNodeForServer(druidBroker, zkPathsConfig, jsonMapper);
+    for (DruidServer druidServer : druidServers) {
+      setupZNodeForServer(druidServer, zkPathsConfig, jsonMapper);
+    }
+
+    final List<DataSegment> segments = Lists.transform(
+        ImmutableList.of(
+            Pair.of("2011-04-01/2011-04-03", "v1"),
+            Pair.of("2011-04-03/2011-04-06", "v1"),
+            Pair.of("2011-04-01/2011-04-09", "v2"),
+            Pair.of("2011-04-06/2011-04-09", "v3"),
+            Pair.of("2011-04-01/2011-04-02", "v3")
+        ),
+        input -> dataSegmentWithIntervalAndVersion(input.lhs, input.rhs)
+    );
+
+    DataSegment brokerSegment = dataSegmentWithIntervalAndVersion("2011-04-01/2011-04-11", "v4");
+    announceSegmentForServer(druidBroker, brokerSegment, zkPathsConfig, jsonMapper);
+    for (int i = 0; i < 5; ++i) {
+      announceSegmentForServer(druidServers.get(i), segments.get(i), zkPathsConfig, jsonMapper);
+    }
+    Assert.assertTrue(timing.forWaiting().awaitLatch(segmentViewInitLatch));
+    Assert.assertTrue(timing.forWaiting().awaitLatch(segmentAddedLatch));
+
+    TimelineLookup timeline = brokerServerView.getTimeline(
+        DataSourceAnalysis.forDataSource(new TableDataSource("test_broker_server_view"))
+    ).get();
+
+    assertValues(
+        Arrays.asList(
+            createExpected("2011-04-01/2011-04-02", "v3", druidServers.get(4), segments.get(4)),
+            createExpected("2011-04-02/2011-04-06", "v2", druidServers.get(2), segments.get(2)),
+            createExpected("2011-04-06/2011-04-09", "v3", druidServers.get(3), segments.get(3))
+        ),
+        (List<TimelineObjectHolder>) timeline.lookup(
+            Intervals.of(
+                "2011-04-01/2011-04-09"
+            )
+        )
+    );
+
+    // unannounce the broker segment should do nothing to announcements
+    unannounceSegmentForServer(druidBroker, brokerSegment, zkPathsConfig);
+    Assert.assertTrue(timing.forWaiting().awaitLatch(segmentRemovedLatch));
+
+    // renew segmentRemovedLatch since we still have 5 segments to unannounce
+    segmentRemovedLatch = new CountDownLatch(5);
+
+    timeline = brokerServerView.getTimeline(
+        DataSourceAnalysis.forDataSource(new TableDataSource("test_broker_server_view"))
+    ).get();
+
+    // expect same set of segments as before
+    assertValues(
+        Arrays.asList(
+            createExpected("2011-04-01/2011-04-02", "v3", druidServers.get(4), segments.get(4)),
+            createExpected("2011-04-02/2011-04-06", "v2", druidServers.get(2), segments.get(2)),
+            createExpected("2011-04-06/2011-04-09", "v3", druidServers.get(3), segments.get(3))
+        ),
+        (List<TimelineObjectHolder>) timeline.lookup(
+            Intervals.of(
+                "2011-04-01/2011-04-09"
+            )
+        )
+    );
+
+    // unannounce all the segments
+    for (int i = 0; i < 5; ++i) {
+      unannounceSegmentForServer(druidServers.get(i), segments.get(i), zkPathsConfig);
+    }
+    Assert.assertTrue(timing.forWaiting().awaitLatch(segmentRemovedLatch));
+  }
+
+
   private Pair<Interval, Pair<String, Pair<DruidServer, DataSegment>>> createExpected(
       String intervalStr,
       String version,
@@ -291,7 +383,7 @@ public class BrokerServerViewTest extends CuratorTestBase
       ServerSelector selector = ((SingleElementPartitionChunk<ServerSelector>) actualPartitionHolder.iterator()
                                                                                                     .next()).getObject();
       Assert.assertFalse(selector.isEmpty());
-      Assert.assertEquals(expectedPair.rhs.rhs.lhs, selector.pick().getServer());
+      Assert.assertEquals(expectedPair.rhs.rhs.lhs, selector.pick(null).getServer());
       Assert.assertEquals(expectedPair.rhs.rhs.rhs, selector.getSegment());
     }
   }

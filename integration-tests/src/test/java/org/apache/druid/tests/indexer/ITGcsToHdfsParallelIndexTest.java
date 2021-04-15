@@ -33,7 +33,7 @@ import java.util.List;
  * 1) Set the bucket and path for your data. This can be done by setting -Ddruid.test.config.cloudBucket and
  *    -Ddruid.test.config.cloudPath or setting "cloud_bucket" and "cloud_path" in the config file.
  * 2) Copy wikipedia_index_data1.json, wikipedia_index_data2.json, and wikipedia_index_data3.json
- *    located in integration-tests/src/test/resources/data/batch_index to your GCS at the location set in step 1.
+ *    located in integration-tests/src/test/resources/data/batch_index/json to your GCS at the location set in step 1.
  * 3) Provide -Doverride.config.path=<PATH_TO_FILE> with gcs configs and hdfs deep storage configs set. See
  *    integration-tests/docker/environment-configs/override-examples/gcs and
  *    integration-tests/docker/environment-configs/override-examples/hdfs for env vars to provide.
@@ -42,7 +42,7 @@ import java.util.List;
  */
 @Test(groups = TestNGGroup.HDFS_DEEP_STORAGE)
 @Guice(moduleFactory = DruidTestModuleFactory.class)
-public class ITGcsToHdfsParallelIndexTest extends AbstractGcsInputSourceSimpleIndexTest
+public class ITGcsToHdfsParallelIndexTest extends AbstractGcsInputSourceParallelIndexTest
 {
   @Test(dataProvider = "resources")
   public void testGcsIndexData(Pair<String, List> gcsInputSource) throws Exception

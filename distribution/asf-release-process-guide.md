@@ -39,15 +39,41 @@ $ git checkout origin/master
 $ git checkout -b 0.17.0
 ```
 
-Then push the branch to `origin`. If doing a quarterly release, it will also be necessary to bump the version in master to the next release snapshot:
+Then push the branch to `origin`. 
+
+#### Preparing the master branch for the next version after branching
+If doing a quarterly release, it will also be necessary to prepare master for the release _after_ the release you are working on, by setting the version to the next release snapshot:
 
 ```bash
 $ mvn versions:set -DnewVersion=0.18.0-SNAPSHOT
 ```
 
-and open a PR to the master branch. Bug fix releases should already have the correct snapshot version from the previous releases on the branch, so this step is not necessary.
+You should also prepare the web-console for the next release, by bumping the [package.json](../web-console/package.json) and [package-lock.json](../web-console/package-lock.json) version:
 
-The only additions to the release branch after this branch should be bug fixes, which should be back-ported from the master branch, via a second PR, not with a direct PR to the release branch. Bug fix release branches may be initially populated via cherry-picking, but it is recommended to leave at least 1 commit to do as a backport PR in order to run through CI. (Note that CI is sometimes flaky for older branches).
+```bash
+npm version 0.18.0
+```
+and update the script tag top level html file, [unified-console.html](../web-console/unified-console.html):
+
+```html
+<script src="public/web-console-0.18.0.js"></script>
+```
+
+Finally, the sample [`docker-compose.yml`](https://github.com/apache/druid/blob/master/distribution/docker/docker-compose.yml) used in the Docker quickstart documentation should be updated to reflect the version for the next release:
+
+```yaml
+...
+  coordinator:
+    image: apache/druid:0.18.0
+    container_name: coordinator
+...
+```
+
+Once this is completed, open a PR to the master branch. Also, be sure to confirm that these versions are all correct in the release branch, otherwise fix them and open a backport PR to the release branch.
+
+### Release branch hygiene
+
+The only additions to the release branch after branching should be bug fixes, which should be back-ported from the master branch, via a second PR, not with a direct PR to the release branch. Bug fix release branches may be initially populated via cherry-picking, but it is recommended to leave at least 1 commit to do as a backport PR in order to run through CI. (Note that CI is sometimes flaky for older branches).
 
 Once all issues and PRs that are still tagged with the release milestone have been merged, closed, or removed from the milestone, the next step is to put together a release candidate.
 
@@ -183,6 +209,21 @@ It is also the release managers responsibility for correctly assigning all PRs m
 
 Next create an issue in the Druid github to contain the release notes and allow the community to provide feedback prior to the release. Make sure to attach it to the release milestone in github. It is highly recommended to review [previous release notes for reference](https://github.com/apache/druid/releases) of how to best structure them. Be sure to call out any exciting new features, important bug fixes, and any compatibility concerns for users or operators to consider when upgrading to this release.
 
+## Web console package version
+Make sure the web console Javascript package version matches the upcoming release version prior to making tags and artifacts. You can find the release version in [package.json](../web-console/package.json). This should be set correctly, but if it isn't, it can be set with: 
+
+```bash
+npm version 0.17.0
+```
+
+which will update `package.json` and `package-lock.json`.
+
+You will also need to manually update the top level html file, [unified-console.html](../web-console/unified-console.html), to ensure that the Javascript script tag is set to match the package.json version.
+
+```html
+<script src="public/web-console-0.17.0.js"></script>
+```
+
 
 ## Building a release candidate
 
@@ -267,14 +308,14 @@ $ svn commit -m 'add 0.17.0-rc3 artifacts'
 
 2. From druid-website, checkout branch `asf-staging`.
 
-3. From druid-website-src, run `./release.sh 0.17.0 0.17.0`, replacing `0.17.0` where the first argument is the release version and 2nd argument is commit-ish. This script will:
+3. From druid-website-src, create a release branch from `master` and run `./release.sh 0.17.0 0.17.0`, replacing `0.17.0` where the first argument is the release version and 2nd argument is commit-ish. This script will:
 
 * checkout the tag of the Druid release version
 * build the docs for that version into druid-website-src
 * build druid-website-src into druid-website
 * stage druid-website-src and druid-website repositories to git.
 
-4. Make a PR to the src repo (https://github.com/apache/druid-website-src) for the release branch. Once the website PR is pushed to `asf-site`, https://druid.staged.apache.org/ will be updated near immediately with the new docs.
+4. Make a PR to the src repo (https://github.com/apache/druid-website-src) for the release branch. Once the website PR is pushed to `asf-staging`, https://druid.staged.apache.org/ will be updated near immediately with the new docs.
 
 ### Create staged Maven repo
 
@@ -320,6 +361,9 @@ https://github.com/apache/druid/releases/tag/druid-0.17.0-rc3
 
 The artifacts to be voted on are located here:
 https://dist.apache.org/repos/dist/dev/druid/0.17.0-rc3/
+
+A staged Maven repository is available for review at:
+https://repository.apache.org/content/repositories/orgapachedruid-1016/
 
 Staged druid.apache.org website documentation is available here:
 https://druid.staged.apache.org/docs/0.17.0/design/index.html
@@ -513,14 +557,18 @@ druid_versions:
         date: 2019-08-15
 ```
 
-3. From druid-website-src, run `./release.sh 0.17.0 0.17.0`, replacing `0.17.0` where the first argument is the release version and 2nd argument is commit-ish. This script will:
+3. From druid-website, checkout branch `asf-site`.
+
+4. From druid-website-src, checkout the branch you created to update the staged Druid website or create a new branch from `master` if you have not.
+
+5. From druid-website-src, run `./release.sh 0.17.0 0.17.0`, replacing `0.17.0` where the first argument is the release version and 2nd argument is commit-ish. This script will:
 
 * checkout the tag of the Druid release version
 * build the docs for that version into druid-website-src
 * build druid-website-src into druid-website
 * stage druid-website-src and druid-website repositories to git.
 
-4. Make a PR to the src repo (https://github.com/apache/druid-website-src) and to the website repo (https://github.com/apache/druid-website). Once the website PR is merged, https://druid.apache.org/ will be updated immediately.
+6. Make a PR to the src repo (https://github.com/apache/druid-website-src) and to the website repo (https://github.com/apache/druid-website). Once the website PR is merged, https://druid.apache.org/ will be updated immediately.
 
 ### Draft a release on github
 

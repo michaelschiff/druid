@@ -22,13 +22,12 @@ package org.apache.druid.indexing.kinesis.supervisor;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableMap;
 import org.apache.druid.common.aws.AWSCredentialsConfig;
-import org.apache.druid.indexing.common.stats.RowIngestionMetersFactory;
+import org.apache.druid.common.utils.IdUtils;
+import org.apache.druid.data.input.impl.ByteEntity;
 import org.apache.druid.indexing.common.task.Task;
 import org.apache.druid.indexing.common.task.TaskResource;
-import org.apache.druid.indexing.common.task.utils.RandomIdUtils;
 import org.apache.druid.indexing.kinesis.KinesisDataSourceMetadata;
 import org.apache.druid.indexing.kinesis.KinesisIndexTask;
 import org.apache.druid.indexing.kinesis.KinesisIndexTaskClientFactory;
@@ -40,6 +39,7 @@ import org.apache.druid.indexing.overlord.DataSourceMetadata;
 import org.apache.druid.indexing.overlord.IndexerMetadataStorageCoordinator;
 import org.apache.druid.indexing.overlord.TaskMaster;
 import org.apache.druid.indexing.overlord.TaskStorage;
+import org.apache.druid.indexing.overlord.supervisor.autoscaler.LagStats;
 import org.apache.druid.indexing.seekablestream.SeekableStreamDataSourceMetadata;
 import org.apache.druid.indexing.seekablestream.SeekableStreamEndSequenceNumbers;
 import org.apache.druid.indexing.seekablestream.SeekableStreamIndexTask;
@@ -49,12 +49,12 @@ import org.apache.druid.indexing.seekablestream.SeekableStreamSequenceNumbers;
 import org.apache.druid.indexing.seekablestream.SeekableStreamStartSequenceNumbers;
 import org.apache.druid.indexing.seekablestream.common.OrderedSequenceNumber;
 import org.apache.druid.indexing.seekablestream.common.RecordSupplier;
-import org.apache.druid.indexing.seekablestream.common.StreamPartition;
 import org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervisor;
 import org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervisorIOConfig;
 import org.apache.druid.indexing.seekablestream.supervisor.SeekableStreamSupervisorReportPayload;
 import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.emitter.EmittingLogger;
+import org.apache.druid.segment.incremental.RowIngestionMetersFactory;
 import org.joda.time.DateTime;
 
 import java.util.ArrayList;
@@ -64,6 +64,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.stream.Collectors;
 
 /**
  * Supervisor responsible for managing the KinesisIndexTask for a single dataSource. At a high level, the class accepts a
@@ -73,7 +74,7 @@ import java.util.TreeMap;
  * tasks to satisfy the desired number of replicas. As tasks complete, new tasks are queued to process the next range of
  * Kinesis sequences.
  */
-public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
+public class KinesisSupervisor extends SeekableStreamSupervisor<String, String, ByteEntity>
 {
   private static final EmittingLogger log = new EmittingLogger(KinesisSupervisor.class);
 
@@ -82,7 +83,7 @@ public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
       {
       };
 
-  public static final String NOT_SET = "-1";
+  public static final String OFFSET_NOT_SET = "-1";
   private final KinesisSupervisorSpec spec;
   private final AWSCredentialsConfig awsCredentialsConfig;
   private volatile Map<String, Long> currentPartitionTimeLag;
@@ -140,9 +141,7 @@ public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
         true,
         minimumMessageTime,
         maximumMessageTime,
-        ioConfig.getInputFormat(
-            spec.getDataSchema().getParser() == null ? null : spec.getDataSchema().getParser().getParseSpec()
-        ),
+        ioConfig.getInputFormat(),
         ioConfig.getEndpoint(),
         ioConfig.getRecordsPerFetch(),
         ioConfig.getFetchDelayMillis(),
@@ -153,7 +152,7 @@ public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
   }
 
   @Override
-  protected List<SeekableStreamIndexTask<String, String>> createIndexTasks(
+  protected List<SeekableStreamIndexTask<String, String, ByteEntity>> createIndexTasks(
       int replicas,
       String baseSequenceName,
       ObjectMapper sortingMapper,
@@ -167,9 +166,9 @@ public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
     final Map<String, Object> context = createBaseTaskContexts();
     context.put(CHECKPOINTS_CTX_KEY, checkpoints);
 
-    List<SeekableStreamIndexTask<String, String>> taskList = new ArrayList<>();
+    List<SeekableStreamIndexTask<String, String, ByteEntity>> taskList = new ArrayList<>();
     for (int i = 0; i < replicas; i++) {
-      String taskId = Joiner.on("_").join(baseSequenceName, RandomIdUtils.getRandomId());
+      String taskId = IdUtils.getRandomIdWithPrefix(baseSequenceName);
       taskList.add(new KinesisIndexTask(
           taskId,
           new TaskResource(baseSequenceName, 1),
@@ -177,11 +176,7 @@ public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
           (KinesisIndexTaskTuningConfig) taskTuningConfig,
           (KinesisIndexTaskIOConfig) taskIoConfig,
           context,
-          null,
-          null,
-          rowIngestionMetersFactory,
-          awsCredentialsConfig,
-          null
+          awsCredentialsConfig
       ));
     }
     return taskList;
@@ -189,8 +184,7 @@ public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
 
 
   @Override
-  protected RecordSupplier<String, String> setupRecordSupplier()
-      throws RuntimeException
+  protected RecordSupplier<String, String, ByteEntity> setupRecordSupplier() throws RuntimeException
   {
     KinesisSupervisorIOConfig ioConfig = spec.getIoConfig();
     KinesisIndexTaskTuningConfig taskTuningConfig = spec.getTuningConfig();
@@ -204,13 +198,14 @@ public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
         ),
         ioConfig.getRecordsPerFetch(),
         ioConfig.getFetchDelayMillis(),
-        1,
+        0, // skip starting background fetch, it is not used
         ioConfig.isDeaggregate(),
         taskTuningConfig.getRecordBufferSize(),
         taskTuningConfig.getRecordBufferOfferTimeout(),
         taskTuningConfig.getRecordBufferFullWait(),
         taskTuningConfig.getFetchSequenceNumberTimeout(),
-        taskTuningConfig.getMaxRecordsPerPoll()
+        taskTuningConfig.getMaxRecordsPerPoll(),
+        ioConfig.isUseEarliestSequenceNumber()
     );
   }
 
@@ -298,7 +293,19 @@ public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
   @Override
   protected Map<String, Long> getTimeLagPerPartition(Map<String, String> currentOffsets)
   {
-    return ((KinesisRecordSupplier) recordSupplier).getPartitionTimeLag(currentOffsets);
+    return currentOffsets
+        .entrySet()
+        .stream()
+        .filter(e -> e.getValue() != null &&
+                     currentPartitionTimeLag != null &&
+                     currentPartitionTimeLag.get(e.getKey()) != null
+        )
+        .collect(
+            Collectors.toMap(
+                Map.Entry::getKey,
+                e -> currentPartitionTimeLag.get(e.getKey())
+            )
+        );
   }
 
   @Override
@@ -317,13 +324,11 @@ public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
   }
 
   @Override
-  protected void updateLatestSequenceFromStream(
-      RecordSupplier<String, String> recordSupplier,
-      Set<StreamPartition<String>> streamPartitions
-  )
+  protected void updatePartitionLagFromStream()
   {
     KinesisRecordSupplier supplier = (KinesisRecordSupplier) recordSupplier;
-    currentPartitionTimeLag = supplier.getPartitionTimeLag(getHighestCurrentOffsets());
+    // this recordSupplier method is thread safe, so does not need to acquire the recordSupplierLock
+    currentPartitionTimeLag = supplier.getPartitionsTimeLag(getIoConfig().getStream(), getHighestCurrentOffsets());
   }
 
   @Override
@@ -347,7 +352,7 @@ public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
   @Override
   protected String getNotSetMarker()
   {
-    return NOT_SET;
+    return OFFSET_NOT_SET;
   }
 
   @Override
@@ -372,6 +377,13 @@ public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
   protected boolean useExclusiveStartSequenceNumberForNonFirstSequence()
   {
     return true;
+  }
+
+  // not yet supported, will be implemented in the future maybe? need to find a proper way to measure kinesis lag.
+  @Override
+  public LagStats computeLagStats()
+  {
+    throw new UnsupportedOperationException("Compute Lag Stats is not supported in KinesisSupervisor yet.");
   }
 
   @Override
@@ -410,19 +422,6 @@ public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
     );
   }
 
-  @Override
-  protected SeekableStreamDataSourceMetadata<String, String> createDataSourceMetadataWithClosedPartitions(
-      SeekableStreamDataSourceMetadata<String, String> currentMetadata, Set<String> closedPartitionIds
-  )
-  {
-    log.info("Marking closed shards in metadata: " + closedPartitionIds);
-    return createDataSourceMetadataWithClosedOrExpiredPartitions(
-        currentMetadata,
-        closedPartitionIds,
-        KinesisSequenceNumber.END_OF_SHARD_MARKER
-    );
-  }
-
   private SeekableStreamDataSourceMetadata<String, String> createDataSourceMetadataWithClosedOrExpiredPartitions(
       SeekableStreamDataSourceMetadata<String, String> currentMetadata,
       Set<String> terminatedPartitionIds,
@@ -456,7 +455,7 @@ public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
         }
       }
 
-      newSequences = new SeekableStreamStartSequenceNumbers<String, String>(
+      newSequences = new SeekableStreamStartSequenceNumbers<>(
           old.getStream(),
           null,
           newPartitionSequenceNumberMap,
@@ -464,7 +463,7 @@ public class KinesisSupervisor extends SeekableStreamSupervisor<String, String>
           newExclusiveStartPartitions
       );
     } else {
-      newSequences = new SeekableStreamEndSequenceNumbers<String, String>(
+      newSequences = new SeekableStreamEndSequenceNumbers<>(
           old.getStream(),
           null,
           newPartitionSequenceNumberMap,

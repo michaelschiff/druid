@@ -20,9 +20,9 @@
 package org.apache.druid.segment.loading;
 
 import org.apache.druid.java.util.common.MapUtils;
-import org.apache.druid.segment.AbstractSegment;
 import org.apache.druid.segment.QueryableIndex;
 import org.apache.druid.segment.Segment;
+import org.apache.druid.segment.SegmentLazyLoadFailCallback;
 import org.apache.druid.segment.StorageAdapter;
 import org.apache.druid.timeline.DataSegment;
 import org.apache.druid.timeline.SegmentId;
@@ -47,9 +47,9 @@ public class CacheTestSegmentLoader implements SegmentLoader
   }
 
   @Override
-  public Segment getSegment(final DataSegment segment, boolean lazy)
+  public Segment getSegment(final DataSegment segment, boolean lazy, SegmentLazyLoadFailCallback SegmentLazyLoadFailCallback)
   {
-    return new AbstractSegment()
+    return new Segment()
     {
       @Override
       public SegmentId getId()

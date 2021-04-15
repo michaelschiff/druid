@@ -29,6 +29,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.ListenableFuture;
 import org.apache.curator.framework.CuratorFramework;
+import org.apache.curator.framework.recipes.cache.PathChildrenCache;
 import org.apache.druid.indexer.TaskState;
 import org.apache.druid.indexer.TaskStatus;
 import org.apache.druid.indexing.common.IndexingServiceCondition;
@@ -44,6 +45,7 @@ import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
 import org.apache.druid.testing.DeadlockDetectingTimeout;
+import org.easymock.Capture;
 import org.easymock.EasyMock;
 import org.joda.time.Period;
 import org.junit.After;
@@ -55,6 +57,7 @@ import org.junit.rules.TestRule;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -101,16 +104,26 @@ public class RemoteTaskRunnerTest
   {
     doSetup();
 
+    Assert.assertEquals(3, remoteTaskRunner.getTotalTaskSlotCount());
+    Assert.assertEquals(3, remoteTaskRunner.getIdleTaskSlotCount());
+    Assert.assertEquals(0, remoteTaskRunner.getUsedTaskSlotCount());
+
     ListenableFuture<TaskStatus> result = remoteTaskRunner.run(task);
 
     Assert.assertTrue(taskAnnounced(task.getId()));
     mockWorkerRunningTask(task);
     Assert.assertTrue(workerRunningTask(task.getId()));
+
     mockWorkerCompleteSuccessfulTask(task);
     Assert.assertTrue(workerCompletedTask(result));
-
     Assert.assertEquals(task.getId(), result.get().getId());
     Assert.assertEquals(TaskState.SUCCESS, result.get().getStatusCode());
+
+    cf.delete().guaranteed().forPath(JOINER.join(STATUS_PATH, task.getId()));
+
+    Assert.assertEquals(3, remoteTaskRunner.getTotalTaskSlotCount());
+    Assert.assertEquals(3, remoteTaskRunner.getIdleTaskSlotCount());
+    Assert.assertEquals(0, remoteTaskRunner.getUsedTaskSlotCount());
   }
 
   @Test
@@ -418,6 +431,9 @@ public class RemoteTaskRunnerTest
   public void testWorkerRemoved() throws Exception
   {
     doSetup();
+    Assert.assertEquals(3, remoteTaskRunner.getTotalTaskSlotCount());
+    Assert.assertEquals(3, remoteTaskRunner.getIdleTaskSlotCount());
+
     Future<TaskStatus> future = remoteTaskRunner.run(task);
 
     Assert.assertTrue(taskAnnounced(task.getId()));
@@ -446,6 +462,9 @@ public class RemoteTaskRunnerTest
         )
     );
     Assert.assertNull(cf.checkExists().forPath(STATUS_PATH));
+
+    Assert.assertEquals(0, remoteTaskRunner.getTotalTaskSlotCount());
+    Assert.assertEquals(0, remoteTaskRunner.getIdleTaskSlotCount());
   }
 
   @Test
@@ -618,6 +637,9 @@ public class RemoteTaskRunnerTest
     );
     Assert.assertEquals(1, lazyworkers.size());
     Assert.assertEquals(1, remoteTaskRunner.getLazyWorkers().size());
+    Assert.assertEquals(3, remoteTaskRunner.getTotalTaskSlotCount());
+    Assert.assertEquals(0, remoteTaskRunner.getIdleTaskSlotCount());
+    Assert.assertEquals(3, remoteTaskRunner.getLazyTaskSlotCount());
   }
 
   @Test
@@ -928,10 +950,12 @@ public class RemoteTaskRunnerTest
     mockWorkerCompleteFailedTask(task1);
     Assert.assertTrue(taskFuture1.get().isFailure());
     Assert.assertEquals(0, remoteTaskRunner.getBlackListedWorkers().size());
+    Assert.assertEquals(0, remoteTaskRunner.getBlacklistedTaskSlotCount());
 
     Future<TaskStatus> taskFuture2 = remoteTaskRunner.run(task2);
     Assert.assertTrue(taskAnnounced(task2.getId()));
     mockWorkerRunningTask(task2);
+    Assert.assertEquals(0, remoteTaskRunner.getBlacklistedTaskSlotCount());
 
     Future<TaskStatus> taskFuture3 = remoteTaskRunner.run(task3);
     Assert.assertTrue(taskAnnounced(task3.getId()));
@@ -939,9 +963,44 @@ public class RemoteTaskRunnerTest
     mockWorkerCompleteFailedTask(task3);
     Assert.assertTrue(taskFuture3.get().isFailure());
     Assert.assertEquals(1, remoteTaskRunner.getBlackListedWorkers().size());
+    Assert.assertEquals(3, remoteTaskRunner.getBlacklistedTaskSlotCount());
 
     mockWorkerCompleteSuccessfulTask(task2);
     Assert.assertTrue(taskFuture2.get().isSuccess());
     Assert.assertEquals(0, remoteTaskRunner.getBlackListedWorkers().size());
+    Assert.assertEquals(0, remoteTaskRunner.getBlacklistedTaskSlotCount());
+  }
+
+  @Test
+  public void testStatusListenerEventDataNullShouldNotThrowException() throws Exception
+  {
+    // Set up mock emitter to verify log alert when exception is thrown inside the status listener
+    Worker worker = EasyMock.createMock(Worker.class);
+    EasyMock.expect(worker.getHost()).andReturn("host").atLeastOnce();
+    EasyMock.replay(worker);
+    ServiceEmitter emitter = EasyMock.createMock(ServiceEmitter.class);
+    Capture<EmittingLogger.EmittingAlertBuilder> capturedArgument = Capture.newInstance();
+    emitter.emit(EasyMock.capture(capturedArgument));
+    EasyMock.expectLastCall().atLeastOnce();
+    EmittingLogger.registerEmitter(emitter);
+    EasyMock.replay(emitter);
+
+    PathChildrenCache cache = new PathChildrenCache(cf, "/test", true);
+    testStartWithNoWorker();
+    cache.getListenable().addListener(remoteTaskRunner.getStatusListener(worker, new ZkWorker(worker, cache, jsonMapper), null));
+    cache.start(PathChildrenCache.StartMode.POST_INITIALIZED_EVENT);
+
+    // Status listener will recieve event with null data
+    Assert.assertTrue(
+        TestUtils.conditionValid(() -> cache.getCurrentData().size() == 1)
+    );
+
+    // Verify that the log emitter was called
+    EasyMock.verify(worker);
+    EasyMock.verify(emitter);
+    Map<String, Object> alertDataMap = capturedArgument.getValue().build(null).getDataMap();
+    Assert.assertTrue(alertDataMap.containsKey("znode"));
+    Assert.assertNull(alertDataMap.get("znode"));
+    // Status listener should successfully completes without throwing exception
   }
 }

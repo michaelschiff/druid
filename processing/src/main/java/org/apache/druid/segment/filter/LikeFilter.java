@@ -25,6 +25,7 @@ import it.unimi.dsi.fastutil.ints.IntIterable;
 import it.unimi.dsi.fastutil.ints.IntIterator;
 import org.apache.druid.collections.bitmap.ImmutableBitmap;
 import org.apache.druid.common.config.NullHandling;
+import org.apache.druid.java.util.common.IAE;
 import org.apache.druid.query.BitmapResultFactory;
 import org.apache.druid.query.extraction.ExtractionFn;
 import org.apache.druid.query.filter.BitmapIndexSelector;
@@ -34,9 +35,10 @@ import org.apache.druid.query.filter.LikeDimFilter;
 import org.apache.druid.query.filter.ValueMatcher;
 import org.apache.druid.query.filter.vector.VectorValueMatcher;
 import org.apache.druid.query.filter.vector.VectorValueMatcherColumnProcessorFactory;
+import org.apache.druid.segment.ColumnInspector;
+import org.apache.druid.segment.ColumnProcessors;
 import org.apache.druid.segment.ColumnSelector;
 import org.apache.druid.segment.ColumnSelectorFactory;
-import org.apache.druid.segment.DimensionHandlerUtils;
 import org.apache.druid.segment.column.BitmapIndex;
 import org.apache.druid.segment.data.CloseableIndexed;
 import org.apache.druid.segment.data.Indexed;
@@ -44,7 +46,9 @@ import org.apache.druid.segment.vector.VectorColumnSelectorFactory;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.util.Map;
 import java.util.NoSuchElementException;
+import java.util.Objects;
 import java.util.Set;
 
 public class LikeFilter implements Filter
@@ -88,7 +92,7 @@ public class LikeFilter implements Filter
   @Override
   public VectorValueMatcher makeVectorMatcher(final VectorColumnSelectorFactory factory)
   {
-    return DimensionHandlerUtils.makeVectorProcessor(
+    return ColumnProcessors.makeVectorProcessor(
         dimension,
         VectorValueMatcherColumnProcessorFactory.instance(),
         factory
@@ -96,7 +100,7 @@ public class LikeFilter implements Filter
   }
 
   @Override
-  public boolean canVectorizeMatcher()
+  public boolean canVectorizeMatcher(ColumnInspector inspector)
   {
     return true;
   }
@@ -105,6 +109,33 @@ public class LikeFilter implements Filter
   public Set<String> getRequiredColumns()
   {
     return ImmutableSet.of(dimension);
+  }
+
+  @Override
+  public boolean supportsRequiredColumnRewrite()
+  {
+    return true;
+  }
+
+  @Override
+  public Filter rewriteRequiredColumns(Map<String, String> columnRewrites)
+  {
+    String rewriteDimensionTo = columnRewrites.get(dimension);
+
+    if (rewriteDimensionTo == null) {
+      throw new IAE(
+          "Received a non-applicable rewrite: %s, filter's dimension: %s",
+          columnRewrites,
+          dimension
+      );
+    }
+
+    return new LikeFilter(
+        rewriteDimensionTo,
+        extractionFn,
+        likeMatcher,
+        filterTuning
+    );
   }
 
   @Override
@@ -252,5 +283,27 @@ public class LikeFilter implements Filter
         };
       }
     };
+  }
+
+  @Override
+  public boolean equals(Object o)
+  {
+    if (this == o) {
+      return true;
+    }
+    if (o == null || getClass() != o.getClass()) {
+      return false;
+    }
+    LikeFilter that = (LikeFilter) o;
+    return Objects.equals(dimension, that.dimension) &&
+           Objects.equals(extractionFn, that.extractionFn) &&
+           Objects.equals(likeMatcher, that.likeMatcher) &&
+           Objects.equals(filterTuning, that.filterTuning);
+  }
+
+  @Override
+  public int hashCode()
+  {
+    return Objects.hash(dimension, extractionFn, likeMatcher, filterTuning);
   }
 }

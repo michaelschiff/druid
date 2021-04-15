@@ -30,6 +30,7 @@ import javax.annotation.Nullable;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -101,7 +102,7 @@ public class ExprMacroTable
     protected final Expr arg;
 
     // Use Supplier to memoize values as ExpressionSelectors#makeExprEvalSelector() can make repeated calls for them
-    private final Supplier<BindingDetails> analyzeInputsSupplier;
+    private final Supplier<BindingAnalysis> analyzeInputsSupplier;
 
     public BaseScalarUnivariateMacroFunctionExpr(String name, Expr arg)
     {
@@ -111,14 +112,7 @@ public class ExprMacroTable
     }
 
     @Override
-    public void visit(final Visitor visitor)
-    {
-      arg.visit(visitor);
-      visitor.visit(this);
-    }
-
-    @Override
-    public BindingDetails analyzeInputs()
+    public BindingAnalysis analyzeInputs()
     {
       return analyzeInputsSupplier.get();
     }
@@ -129,7 +123,27 @@ public class ExprMacroTable
       return StringUtils.format("%s(%s)", name, arg.stringify());
     }
 
-    private BindingDetails supplyAnalyzeInputs()
+    @Override
+    public boolean equals(Object o)
+    {
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+      BaseScalarUnivariateMacroFunctionExpr that = (BaseScalarUnivariateMacroFunctionExpr) o;
+      return Objects.equals(name, that.name) &&
+             Objects.equals(arg, that.arg);
+    }
+
+    @Override
+    public int hashCode()
+    {
+      return Objects.hash(name, arg);
+    }
+
+    private BindingAnalysis supplyAnalyzeInputs()
     {
       return arg.analyzeInputs().withScalarArguments(ImmutableSet.of(arg));
     }
@@ -144,7 +158,7 @@ public class ExprMacroTable
     protected final List<Expr> args;
 
     // Use Supplier to memoize values as ExpressionSelectors#makeExprEvalSelector() can make repeated calls for them
-    private final Supplier<BindingDetails> analyzeInputsSupplier;
+    private final Supplier<BindingAnalysis> analyzeInputsSupplier;
 
     public BaseScalarMacroFunctionExpr(String name, final List<Expr> args)
     {
@@ -164,24 +178,35 @@ public class ExprMacroTable
     }
 
     @Override
-    public void visit(final Visitor visitor)
-    {
-      for (Expr arg : args) {
-        arg.visit(visitor);
-      }
-      visitor.visit(this);
-    }
-
-    @Override
-    public BindingDetails analyzeInputs()
+    public BindingAnalysis analyzeInputs()
     {
       return analyzeInputsSupplier.get();
     }
 
-    private BindingDetails supplyAnalyzeInputs()
+    @Override
+    public boolean equals(Object o)
+    {
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+      BaseScalarMacroFunctionExpr that = (BaseScalarMacroFunctionExpr) o;
+      return Objects.equals(name, that.name) &&
+             Objects.equals(args, that.args);
+    }
+
+    @Override
+    public int hashCode()
+    {
+      return Objects.hash(name, args);
+    }
+
+    private BindingAnalysis supplyAnalyzeInputs()
     {
       final Set<Expr> argSet = Sets.newHashSetWithExpectedSize(args.size());
-      BindingDetails accumulator = new BindingDetails();
+      BindingAnalysis accumulator = new BindingAnalysis();
       for (Expr arg : args) {
         accumulator = accumulator.with(arg);
         argSet.add(arg);

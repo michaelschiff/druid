@@ -20,6 +20,7 @@
 package org.apache.druid.segment.join.table;
 
 import com.google.common.base.Predicate;
+import org.apache.druid.java.util.common.io.Closer;
 import org.apache.druid.query.extraction.ExtractionFn;
 import org.apache.druid.query.filter.ValueMatcher;
 import org.apache.druid.query.monomorphicprocessing.RuntimeShapeInspector;
@@ -46,13 +47,15 @@ public class IndexedTableDimensionSelector implements DimensionSelector
       IndexedTable table,
       IntSupplier currentRow,
       int columnNumber,
-      @Nullable ExtractionFn extractionFn
+      @Nullable ExtractionFn extractionFn,
+      Closer closer
   )
   {
     this.table = table;
     this.currentRow = currentRow;
     this.extractionFn = extractionFn;
     this.columnReader = table.columnReader(columnNumber);
+    closer.register(columnReader);
     this.currentIndexedInts = new SingleIndexedInt();
   }
 
@@ -86,8 +89,7 @@ public class IndexedTableDimensionSelector implements DimensionSelector
   @Override
   public int getValueCardinality()
   {
-    // +1 for nulls.
-    return table.numRows() + 1;
+    return computeDimensionSelectorCardinality(table);
   }
 
   @Nullable
@@ -140,5 +142,21 @@ public class IndexedTableDimensionSelector implements DimensionSelector
   {
     inspector.visit("table", table);
     inspector.visit("extractionFn", extractionFn);
+  }
+
+  /**
+   * Returns the value that {@link #getValueCardinality()} would return for a particular {@link IndexedTable}.
+   *
+   * The value will be one higher than {@link IndexedTable#numRows()}, to account for the possibility of phantom nulls.
+   *
+   * @throws IllegalArgumentException if the table's row count is {@link Integer#MAX_VALUE}
+   */
+  static int computeDimensionSelectorCardinality(final IndexedTable table)
+  {
+    if (table.numRows() == Integer.MAX_VALUE) {
+      throw new IllegalArgumentException("Table is too large");
+    }
+
+    return table.numRows() + 1;
   }
 }

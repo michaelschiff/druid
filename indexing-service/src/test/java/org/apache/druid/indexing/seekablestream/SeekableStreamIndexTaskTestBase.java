@@ -19,10 +19,9 @@
 
 package org.apache.druid.indexing.seekablestream;
 
-import com.fasterxml.jackson.annotation.JsonCreator;
-import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.jsontype.NamedType;
 import com.google.common.base.Predicates;
 import com.google.common.base.Throwables;
@@ -34,6 +33,7 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import org.apache.druid.common.config.NullHandling;
 import org.apache.druid.data.input.InputFormat;
+import org.apache.druid.data.input.impl.ByteEntity;
 import org.apache.druid.data.input.impl.DimensionsSpec;
 import org.apache.druid.data.input.impl.FloatDimensionSchema;
 import org.apache.druid.data.input.impl.JSONParseSpec;
@@ -87,7 +87,6 @@ import org.easymock.EasyMockSupport;
 import org.joda.time.Interval;
 import org.junit.Assert;
 
-import javax.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
@@ -129,7 +128,8 @@ public class SeekableStreamIndexTaskTestBase extends EasyMockSupport
   );
   protected static final InputFormat INPUT_FORMAT = new JsonInputFormat(
       new JSONPathSpec(true, ImmutableList.of()),
-      ImmutableMap.of()
+      ImmutableMap.of(),
+      null
   );
   protected static final Logger LOG = new Logger(SeekableStreamIndexTaskTestBase.class);
   protected static ListeningExecutorService taskExec;
@@ -149,12 +149,12 @@ public class SeekableStreamIndexTaskTestBase extends EasyMockSupport
 
   static {
     OBJECT_MAPPER = new TestUtils().getTestObjectMapper();
-    OBJECT_MAPPER.registerSubtypes(new NamedType(UnimplementedInputFormatJsonParseSpec.class, "json"));
+    OBJECT_MAPPER.registerSubtypes(new NamedType(JSONParseSpec.class, "json"));
     OLD_DATA_SCHEMA = new DataSchema(
         "test_ds",
         OBJECT_MAPPER.convertValue(
             new StringInputRowParser(
-                new UnimplementedInputFormatJsonParseSpec(
+                new JSONParseSpec(
                     new TimestampSpec("timestamp", "iso", null),
                     new DimensionsSpec(
                         Arrays.asList(
@@ -168,7 +168,8 @@ public class SeekableStreamIndexTaskTestBase extends EasyMockSupport
                         null
                     ),
                     new JSONPathSpec(true, ImmutableList.of()),
-                    ImmutableMap.of()
+                    ImmutableMap.of(),
+                    false
                 ),
                 StandardCharsets.UTF_8.name()
             ),
@@ -191,7 +192,7 @@ public class SeekableStreamIndexTaskTestBase extends EasyMockSupport
     this.lockGranularity = lockGranularity;
   }
 
-  protected static String jb(
+  protected static ByteEntity jb(
       String timestamp,
       String dim1,
       String dim2,
@@ -200,8 +201,81 @@ public class SeekableStreamIndexTaskTestBase extends EasyMockSupport
       String met1
   )
   {
+    return jb(false, timestamp, dim1, dim2, dimLong, dimFloat, met1);
+  }
+
+  protected static byte[] jbb(
+      String timestamp,
+      String dim1,
+      String dim2,
+      String dimLong,
+      String dimFloat,
+      String met1
+  )
+  {
+    return jbb(false, timestamp, dim1, dim2, dimLong, dimFloat, met1);
+  }
+
+  protected static ByteEntity jb(boolean prettyPrint,
+      String timestamp,
+      String dim1,
+      String dim2,
+      String dimLong,
+      String dimFloat,
+      String met1
+  )
+  {
+    return new ByteEntity(jbb(prettyPrint, timestamp, dim1, dim2, dimLong, dimFloat, met1));
+  }
+
+  protected static byte[] jbb(
+      boolean prettyPrint,
+      String timestamp,
+      String dim1,
+      String dim2,
+      String dimLong,
+      String dimFloat,
+      String met1
+  )
+  {
+    return StringUtils.toUtf8(toJsonString(
+        prettyPrint,
+        timestamp,
+        dim1,
+        dim2,
+        dimLong,
+        dimFloat,
+        met1
+    ));
+  }
+
+  protected static List<ByteEntity> jbl(
+      String timestamp,
+      String dim1,
+      String dim2,
+      String dimLong,
+      String dimFloat,
+      String met1
+  )
+  {
+    return Collections.singletonList(jb(timestamp, dim1, dim2, dimLong, dimFloat, met1));
+  }
+
+  protected static String toJsonString(boolean prettyPrint,
+                             String timestamp,
+                             String dim1,
+                             String dim2,
+                             String dimLong,
+                             String dimFloat,
+                             String met1
+  )
+  {
     try {
-      return new ObjectMapper().writeValueAsString(
+      ObjectMapper mapper = new ObjectMapper();
+      if (prettyPrint) {
+        mapper.enable(SerializationFeature.INDENT_OUTPUT);
+      }
+      return mapper.writeValueAsString(
           ImmutableMap.builder()
                       .put("timestamp", timestamp)
                       .put("dim1", dim1)
@@ -215,18 +289,6 @@ public class SeekableStreamIndexTaskTestBase extends EasyMockSupport
     catch (Exception e) {
       throw new RuntimeException(e);
     }
-  }
-
-  protected static List<String> jbl(
-      String timestamp,
-      String dim1,
-      String dim2,
-      String dimLong,
-      String dimFloat,
-      String met1
-  )
-  {
-    return Collections.singletonList(jb(timestamp, dim1, dim2, dimLong, dimFloat, met1));
   }
 
   protected File getSegmentDirectory()
@@ -441,27 +503,6 @@ public class SeekableStreamIndexTaskTestBase extends EasyMockSupport
     public SegmentDescriptor getSegmentDescriptor()
     {
       return segmentDescriptor;
-    }
-  }
-
-  private static class UnimplementedInputFormatJsonParseSpec extends JSONParseSpec
-  {
-    @JsonCreator
-    private UnimplementedInputFormatJsonParseSpec(
-        @JsonProperty("timestampSpec") TimestampSpec timestampSpec,
-        @JsonProperty("dimensionsSpec") DimensionsSpec dimensionsSpec,
-        @JsonProperty("flattenSpec") JSONPathSpec flattenSpec,
-        @JsonProperty("featureSpec") Map<String, Boolean> featureSpec
-    )
-    {
-      super(timestampSpec, dimensionsSpec, flattenSpec, featureSpec);
-    }
-
-    @Nullable
-    @Override
-    public InputFormat toInputFormat()
-    {
-      return null;
     }
   }
 }

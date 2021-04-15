@@ -44,7 +44,8 @@ import org.apache.druid.segment.indexing.granularity.ArbitraryGranularitySpec;
 import org.apache.druid.segment.indexing.granularity.GranularitySpec;
 import org.apache.druid.segment.realtime.appenderator.AppenderatorsManager;
 import org.apache.druid.segment.transform.TransformSpec;
-import org.apache.druid.timeline.partition.HashBasedNumberedShardSpec;
+import org.apache.druid.timeline.partition.BuildingHashBasedNumberedShardSpec;
+import org.apache.druid.timeline.partition.HashPartitionFunction;
 import org.easymock.EasyMock;
 import org.joda.time.Duration;
 import org.joda.time.Interval;
@@ -52,6 +53,7 @@ import org.joda.time.Interval;
 import javax.annotation.Nullable;
 import java.io.File;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -100,10 +102,12 @@ class ParallelIndexTestingFactory
   private static final String SCHEMA_DIMENSION = "dim";
   private static final String DATASOURCE = "datasource";
 
-  static final HashBasedNumberedShardSpec HASH_BASED_NUMBERED_SHARD_SPEC = new HashBasedNumberedShardSpec(
+  static final BuildingHashBasedNumberedShardSpec HASH_BASED_NUMBERED_SHARD_SPEC = new BuildingHashBasedNumberedShardSpec(
+      PARTITION_ID,
       PARTITION_ID,
       PARTITION_ID + 1,
       Collections.singletonList("dim"),
+      HashPartitionFunction.MURMUR3_32_ABS,
       ParallelIndexTestingFactory.NESTED_OBJECT_MAPPER
   );
 
@@ -155,8 +159,10 @@ class ParallelIndexTestingFactory
       return new ParallelIndexTuningConfig(
           1,
           null,
+          null,
           3,
           4L,
+          null,
           5L,
           6,
           null,
@@ -178,7 +184,8 @@ class ParallelIndexTestingFactory
           22,
           logParseExceptions,
           maxParseExceptions,
-          25
+          25,
+          null
       );
     }
   }
@@ -271,8 +278,20 @@ class ParallelIndexTestingFactory
     }
   }
 
+  static String createRowFromMap(long timestamp, Map<String, Object> fields)
+  {
+    HashMap<String, Object> row = new HashMap<>(fields);
+    row.put(SCHEMA_TIME, timestamp);
+    try {
+      return NESTED_OBJECT_MAPPER.writeValueAsString(row);
+    }
+    catch (JsonProcessingException e) {
+      throw new RuntimeException(e);
+    }
+  }
+
   static InputFormat getInputFormat()
   {
-    return new JsonInputFormat(null, null);
+    return new JsonInputFormat(null, null, null);
   }
 }

@@ -76,8 +76,15 @@ public class InlineJoinableFactoryTest
 
     Assert.assertThat(joinable, CoreMatchers.instanceOf(IndexedTableJoinable.class));
     Assert.assertEquals(ImmutableList.of("str", "long"), joinable.getAvailableColumns());
-    Assert.assertEquals(2, joinable.getCardinality("str"));
-    Assert.assertEquals(2, joinable.getCardinality("long"));
+    Assert.assertEquals(3, joinable.getCardinality("str"));
+    Assert.assertEquals(3, joinable.getCardinality("long"));
+  }
+
+  @Test
+  public void testIsDirectlyJoinable()
+  {
+    Assert.assertTrue(factory.isDirectlyJoinable(inlineDataSource));
+    Assert.assertFalse(factory.isDirectlyJoinable(new TableDataSource("foo")));
   }
 
   private static JoinConditionAnalysis makeCondition(final String condition)

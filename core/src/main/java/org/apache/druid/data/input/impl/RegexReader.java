@@ -42,7 +42,7 @@ import java.util.regex.Pattern;
 public class RegexReader extends TextReader
 {
   private final String pattern;
-  private final Pattern compiled;
+  private final Pattern compiledPattern;
   private final Function<String, Object> multiValueFunction;
 
   private List<String> columns;
@@ -51,13 +51,14 @@ public class RegexReader extends TextReader
       InputRowSchema inputRowSchema,
       InputEntity source,
       String pattern,
+      Pattern compiledPattern,
       @Nullable String listDelimiter,
       @Nullable List<String> columns
   )
   {
     super(inputRowSchema, source);
     this.pattern = pattern;
-    this.compiled = Pattern.compile(pattern);
+    this.compiledPattern = compiledPattern;
     final String finalListDelimeter = listDelimiter == null ? Parsers.DEFAULT_LIST_DELIMITER : listDelimiter;
     this.multiValueFunction = ParserUtils.getMultiValueFunction(finalListDelimeter, Splitter.on(finalListDelimeter));
     this.columns = columns;
@@ -70,15 +71,15 @@ public class RegexReader extends TextReader
   }
 
   @Override
-  protected Map<String, Object> toMap(String intermediateRow)
+  protected List<Map<String, Object>> toMap(String intermediateRow)
   {
-    return parseLine(intermediateRow);
+    return Collections.singletonList(parseLine(intermediateRow));
   }
 
   private Map<String, Object> parseLine(String line)
   {
     try {
-      final Matcher matcher = compiled.matcher(line);
+      final Matcher matcher = compiledPattern.matcher(line);
 
       if (!matcher.matches()) {
         throw new ParseException("Incorrect Regex: %s . No match found.", pattern);

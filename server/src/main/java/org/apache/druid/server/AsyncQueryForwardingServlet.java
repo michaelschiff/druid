@@ -32,7 +32,6 @@ import org.apache.druid.guice.annotations.Smile;
 import org.apache.druid.guice.http.DruidHttpClientConfig;
 import org.apache.druid.java.util.common.DateTimes;
 import org.apache.druid.java.util.common.IAE;
-import org.apache.druid.java.util.common.StringUtils;
 import org.apache.druid.java.util.common.jackson.JacksonUtils;
 import org.apache.druid.java.util.emitter.EmittingLogger;
 import org.apache.druid.java.util.emitter.service.ServiceEmitter;
@@ -77,6 +76,9 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
   private static final EmittingLogger log = new EmittingLogger(AsyncQueryForwardingServlet.class);
   @Deprecated // use SmileMediaTypes.APPLICATION_JACKSON_SMILE
   private static final String APPLICATION_SMILE = "application/smile";
+
+  private static final String AVATICA_CONNECTION_ID = "connectionId";
+  private static final String AVATICA_STATEMENT_HANDLE = "statementHandle";
 
   private static final String HOST_ATTRIBUTE = "org.apache.druid.proxy.to.host";
   private static final String SCHEME_ATTRIBUTE = "org.apache.druid.proxy.to.host.scheme";
@@ -373,7 +375,7 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
   static String makeURI(String scheme, String host, String requestURI, String rawQueryString)
   {
     return JettyUtils.concatenateForRewrite(
-        StringUtils.format("%s://%s", scheme, host),
+        scheme + "://" + host,
         requestURI,
         rawQueryString
     );
@@ -422,14 +424,33 @@ public class AsyncQueryForwardingServlet extends AsyncProxyServlet implements Qu
     return interruptedQueryCount.get();
   }
 
-  private static String getAvaticaConnectionId(Map<String, Object> requestMap)
+  @Override
+  public long getTimedOutQueryCount()
   {
-    Object connectionIdObj = requestMap.get("connectionId");
+    // Query timeout metric is not relevant here and this metric is already being tracked in the Broker and the
+    // data nodes using QueryResource
+    return 0L;
+  }
+
+  @VisibleForTesting
+  static String getAvaticaConnectionId(Map<String, Object> requestMap)
+  {
+    // avatica commands always have a 'connectionId'. If commands are not part of a prepared statement, this appears at
+    // the top level of the request, but if it is part of a statement, then it will be nested in the 'statementHandle'.
+    // see https://calcite.apache.org/avatica/docs/json_reference.html#requests for more details
+    Object connectionIdObj = requestMap.get(AVATICA_CONNECTION_ID);
     if (connectionIdObj == null) {
-      throw new IAE("Received an Avatica request without a connectionId.");
+      Object statementHandle = requestMap.get(AVATICA_STATEMENT_HANDLE);
+      if (statementHandle != null && statementHandle instanceof Map) {
+        connectionIdObj = ((Map) statementHandle).get(AVATICA_CONNECTION_ID);
+      }
+    }
+
+    if (connectionIdObj == null) {
+      throw new IAE("Received an Avatica request without a %s.", AVATICA_CONNECTION_ID);
     }
     if (!(connectionIdObj instanceof String)) {
-      throw new IAE("Received an Avatica request with a non-String connectionId.");
+      throw new IAE("Received an Avatica request with a non-String %s.", AVATICA_CONNECTION_ID);
     }
 
     return (String) connectionIdObj;
